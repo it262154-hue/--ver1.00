@@ -1,0 +1,2127 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>異世界自販機 〜勇者様、お金を入れてください〜</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app" class="app">
+  <header id="hud" class="hud">
+    <div class="hud-row">
+      <div class="hud-id"><span id="h-name" class="hud-name"></span><span class="hud-lv">Lv<b id="h-lv"></b></span></div>
+      <div class="hud-bars">
+        <div class="bar-line"><span class="bar-label">HP</span><div class="bar hp"><i id="h-hpbar"></i><span id="h-hp"></span></div></div>
+        <div class="bar-line"><span class="bar-label">EXP</span><div class="bar exp"><i id="h-expbar"></i><span id="h-exp"></span></div></div>
+      </div>
+      <div class="hud-gold">💰 <b id="h-gold"></b> G</div>
+      <div class="hud-equip"><span id="h-weapon"></span><span id="h-armor"></span></div>
+      <div class="hud-audio"><button id="btn-bgm" class="mini" aria-label="BGM切り替え">🎵</button><button id="btn-sfx" class="mini" aria-label="効果音切り替え">🔊</button></div>
+    </div>
+    <div class="hud-row2"><div id="h-status" class="chips"></div><button id="h-ticker" class="ticker" aria-label="ログを開く">📜</button></div>
+  </header>
+  <main id="main">
+    <section id="view-vending" class="view active" aria-label="自販機"></section>
+    <section id="view-battle" class="view" aria-label="バトル"></section>
+  </main>
+  <nav id="taskbar" class="taskbar" aria-label="メニュー">
+    <button data-view="vending" class="on"><span>🏪</span>自販機</button>
+    <button data-view="battle"><span>⚔️</span>バトル</button>
+    <button id="tb-inv"><span>🎒</span>持ち物</button>
+    <button id="tb-dex"><span>📖</span>図鑑</button>
+    <button id="tb-ach"><span>🏆</span>実績</button>
+    <button id="tb-set"><span>⚙️</span>設定</button>
+  </nav>
+</div>
+<div id="modal-root"></div>
+<div id="toast-root" aria-live="polite"></div>
+<div id="fx-layer"></div>
+<noscript>このゲームはJavaScriptが必要です。</noscript>
+<script>
+'use strict';
+/* =====================================================================
+   異世界自販機 〜勇者様、お金を入れてください〜
+   p1: 定数・商品データ
+   ===================================================================== */
+const SAVE_KEY = 'isekai-vending-save-v1';
+const SAVE_VER = 1;
+const MAX_LV = 40;
+const HP_PER_LV = 18;
+const RARITY = {
+  common: 'Common', uncommon: 'Uncommon', rare: 'Rare', epic: 'Epic',
+  legendary: 'Legendary', cursed: 'Cursed', mystery: '???'
+};
+const CATS = [
+  { id: 'all', name: 'すべて', icon: '🏪' },
+  { id: 'potion', name: '回復薬', icon: '🧪' },
+  { id: 'weapon', name: '武器', icon: '⚔️' },
+  { id: 'armor', name: '防具', icon: '🛡️' },
+  { id: 'drink', name: '飲料', icon: '🥤' },
+  { id: 'food', name: '食品', icon: '🍙' },
+  { id: 'magic', name: '魔法道具', icon: '🔮' },
+  { id: 'gag', name: 'ネタ商品', icon: '🪨' },
+  { id: 'curse', name: '呪物', icon: '💀' },
+  { id: 'rare', name: 'レア商品', icon: '💎' },
+  { id: 'mystery', name: '謎の商品', icon: '❓' }
+];
+const CAT_NAME = Object.fromEntries(CATS.map(c => [c.id, c.name]));
+
+/* 効果ショートハンド */
+const heal = v => ({ t: 'heal', v });
+const healP = v => ({ t: 'healPct', v });
+const cure = s => ({ t: 'cure', s });
+const st = (s, n, o) => Object.assign({ t: 'st', s, n, to: 'self' }, o);
+const est = (s, n, c, o) => Object.assign({ t: 'st', s, n, c: c == null ? 1 : c, to: 'enemy' }, o);
+const dmg = (v, el, o) => Object.assign({ t: 'dmg', v, el }, o);
+const msg = text => ({ t: 'msg', text });
+const maybe = (c, ok, fail) => ({ t: 'maybe', c, ok, fail });
+
+const ITEMS = [];
+function I(id, name, cat, price, rar, icon, desc, o) {
+  ITEMS.push(Object.assign({
+    id, name, cat, price, rar, icon, desc,
+    type: 'consumable', battle: true, field: true, effects: []
+  }, o || {}));
+}
+
+/* ---------- 回復薬 ---------- */
+I('small-potion', '小さなポーション', 'potion', 30, 'common', '🧪', 'HPを少し回復する。駆け出し勇者の味方。', { effects: [heal(30)] });
+I('potion', 'ポーション', 'potion', 80, 'common', '🧪', 'HPを中程度回復する。定番商品。', { effects: [heal(80)] });
+I('hi-potion', '高級ポーション', 'potion', 220, 'uncommon', '⚗️', 'HPを大きく回復する。ラベルが金色。', { effects: [heal(200)], un: { lv: 4 } });
+I('mega-potion', 'ハイパーポーション', 'potion', 420, 'rare', '🧴', 'HPを大きく回復する（450）。上級者向けの大瓶。', { effects: [heal(450)], un: { lv: 14 } });
+I('elixir', 'エリクサー', 'potion', 700, 'epic', '🍾', 'HPを全回復し、状態異常も治す。在庫限り。', { effects: [healP(100), cure('all')], un: { lv: 10 }, stock: 3 });
+I('mana-soda', 'マナ風ソーダ', 'potion', 60, 'uncommon', '🥤', 'HPを少し回復。シュワッと魔力が弾けると攻撃力も上がる（かも）。', { effects: [heal(35), maybe(0.5, [st('atkUp', 3)], [msg('ただの炭酸だった。')])] });
+I('healing-milk', '癒やしの牛乳', 'potion', 70, 'uncommon', '🥛', 'HPを回復し、毒を解除する。腰に手を当てて飲もう。', { effects: [heal(60), cure('poison')] });
+I('hero-drink', '勇者の栄養ドリンク', 'potion', 110, 'uncommon', '🍶', 'HPを回復し、一定ターン攻撃力が上がる。', { effects: [heal(50), st('atkUp', 4)] });
+I('strange-jelly', '怪しいゼリー', 'potion', 45, 'uncommon', '🟣', '回復量がランダム。当たり外れが激しい。', { effects: [{ t: 'healRand', min: 5, max: 110 }] });
+I('holy-water', '聖水', 'potion', 90, 'rare', '💧', '状態異常を治し、アンデッドに大ダメージ。', { effects: [cure('all'), dmg(20, 'holy', { tag: 'undead', m: 3.5, only: true })] });
+I('expired-potion', '賞味期限切れポーション', 'potion', 12, 'common', '☠️', '安い。効くこともあるが、外すと毒。賞味期限？ 異世界にその概念はない。', { expired: true, effects: [maybe(0.55, [heal(90)], [msg('ひどい味だ…毒を受けた！'), st('poison', 4)])] });
+I('antidote-herb', '解毒草', 'potion', 25, 'common', '🌿', '毒を治し、少しだけHPを回復する。', { effects: [cure('poison'), heal(10)] });
+
+/* ---------- 武器 ---------- */
+const W = 'weapon';
+I('wooden-stick', '木の棒', W, 0, 'common', '🪵', '初期装備。拾った棒。', { type: 'weapon', atk: 2, noShop: true, battle: false });
+I('rusty-sword', '錆びた剣', W, 120, 'common', '🗡️', '錆びているが剣は剣。', { type: 'weapon', atk: 6 });
+I('iron-sword', '鉄の剣', W, 350, 'uncommon', '⚔️', '信頼と実績の鉄製。', { type: 'weapon', atk: 11, un: { lv: 3 } });
+I('hero-sword', '勇者の剣', W, 1500, 'rare', '🗡️', '勇者の名にふさわしい聖なる刃。', { type: 'weapon', atk: 20, el: 'holy', crit: 0.05, un: { lv: 10 }, sp: '聖属性 / 会心+5%' });
+I('slime-sword', 'スライムソード', W, 420, 'uncommon', '🟢', 'ぷるぷる刃。25%で敵を毒にする。', { type: 'weapon', atk: 9, onHit: { s: 'poison', c: 0.25, n: 3 }, un: { def: 'slime' }, sp: '25%で毒' });
+I('legendary-leek', '伝説のネギ', W, 800, 'epic', '🧅', 'なぜか伝説。会心が出やすい。', { type: 'weapon', atk: 8, crit: 0.3, un: { lv: 5 }, sp: '会心+30%' });
+I('harisen-blade', 'ハリセンブレード', W, 260, 'uncommon', '📜', 'スパーン！ 25%で敵を混乱させる。', { type: 'weapon', atk: 7, onHit: { s: 'confuse', c: 0.25, n: 2 }, sp: '25%で混乱' });
+I('cardboard-greatsword', '段ボール製の大剣', W, 90, 'common', '📦', '安いのに強い。ただし8%で壊れる。', { type: 'weapon', atk: 12, brk: 0.08, sp: '攻撃時8%で壊れる' });
+I('talking-sword', 'しゃべる剣', W, 600, 'rare', '💬', '攻撃のたびに一言しゃべる。うるさい。', { type: 'weapon', atk: 14, quips: ['「斬れ味より口が立つ！」', '「ワシを買ったのは正解じゃぞ」', '「今の当たり？ 当たりだよな？」', '「おい、手入れしろ」', '「自販機で買われた剣ってワシだけ？」'], sp: '攻撃時にしゃべる' });
+I('wrench', '自販機の補充用レンチ', W, 520, 'rare', '🔧', '機械系の敵に1.8倍ダメージ。', { type: 'weapon', atk: 12, bonus: { tag: 'machine', m: 1.8 }, sp: '機械特効' });
+I('maou-fork', '魔王のフォーク', W, 2800, 'epic', '🍴', '魔王が愛用していた食事用の三叉槍。闇属性。', { type: 'weapon', atk: 28, el: 'dark', un: { def: 'maou' }, sp: '闇属性' });
+I('thunder-spear', '雷鳴の槍', W, 1800, 'epic', '🔱', '雷属性。20%で敵を麻痺させる。', { type: 'weapon', atk: 24, el: 'thunder', onHit: { s: 'para', c: 0.2, n: 2 }, un: { lv: 14 }, sp: '雷属性 / 20%で麻痺' });
+I('fire-staff', '炎の杖', W, 1200, 'rare', '🪄', '火属性の杖。氷の敵によく効く。', { type: 'weapon', atk: 18, el: 'fire', un: { lv: 8 }, sp: '火属性' });
+I('cursed-umbrella', '呪われた傘', 'curse', 700, 'cursed', '☂️', '強力だが、攻撃のたび持ち主も少し傷つく。', { type: 'weapon', atk: 17, self: 0.03, sp: '攻撃時に最大HPの3%を失う' });
+I('returned-legend', '返品された伝説の武器', W, 5000, 'legendary', '🏷️', '強力だが20%の確率で攻撃を拒否する。返品不可。', { type: 'weapon', atk: 36, refuse: 0.2, un: { lv: 16 }, stock: 1, unique: true, sp: '20%で攻撃拒否' });
+I('invisible-sword', '透明な剣', 'rare', 3500, 'epic', '👻', '見えない。買ったかどうかも不安になる。敵の防御を40%無視。', { type: 'weapon', atk: 26, pierce: 0.4, un: { lv: 15 }, sp: '防御無視40%' });
+I('plain-stick', 'ただの棒', 'gag', 8, 'common', '🥢', 'ただの棒。ネタ商品だが、握ると少し強い。', { type: 'weapon', atk: 3 });
+
+/* ---------- 防具 ---------- */
+const A = 'armor';
+I('cloth-clothes', '布の服', A, 60, 'common', '👕', '普通の服。気持ち程度の防御。', { type: 'armor', def: 3 });
+I('leather-armor', '革の鎧', A, 200, 'common', '🥋', '軽くて丈夫。', { type: 'armor', def: 7, un: { lv: 2 } });
+I('iron-armor', '鉄の鎧', A, 600, 'uncommon', '🛡️', '重いが堅い。', { type: 'armor', def: 14, un: { lv: 5 } });
+I('slime-armor', 'スライムアーマー', A, 520, 'uncommon', '🟩', 'ぷよぷよ。毒を50%防ぐ。', { type: 'armor', def: 10, res: { poison: 0.5 }, un: { def: 'slime' }, sp: '毒耐性50%' });
+I('cardboard-armor', '段ボールアーマー', A, 70, 'common', '📦', '安い。8%で攻撃を回避できる。', { type: 'armor', def: 6, dodge: 0.08, sp: '回避8%' });
+I('magic-robe', '魔法のローブ', A, 900, 'rare', '🧥', '最大HP+30。混乱耐性50%。', { type: 'armor', def: 9, hp: 30, res: { confuse: 0.5 }, un: { lv: 7 }, sp: 'HP+30 / 混乱耐性' });
+I('pot-lid', '伝説の鍋のふた', A, 1100, 'epic', '🍲', '伝説の盾。12%で攻撃を防ぐ。', { type: 'armor', def: 12, dodge: 0.12, un: { lv: 9 }, sp: '回避12%' });
+I('cursed-cloak', '呪いのマント', 'curse', 1400, 'cursed', '🦇', '防御は高いが攻撃力が-5される。', { type: 'armor', def: 22, atkMod: -5, un: { lv: 12 }, sp: '攻撃力-5' });
+I('vm-panel', '自販機の外装パネル', A, 2200, 'epic', '🥫', '機械系の敵のダメージを40%軽減。', { type: 'armor', def: 28, vsTag: { tag: 'machine', m: 0.6 }, un: { def: 'vm-guardian' }, sp: '機械から受けるダメージ-40%' });
+I('maou-pajamas', '魔王のパジャマ', A, 3200, 'epic', '🌙', '毎ターンHP+4。麻痺耐性50%。もこもこ。', { type: 'armor', def: 20, regen: 4, res: { para: 0.5 }, un: { def: 'maou' }, sp: 'リジェネ4 / 麻痺耐性' });
+
+/* ---------- 飲料 ---------- */
+const D = 'drink';
+I('water', '普通の水', D, 15, 'common', '💧', 'ただの水。ただの水は偉大。', { effects: [heal(15)] });
+I('premium-water', '高級ミネラルウォーター', D, 60, 'uncommon', '🧊', 'HPを回復し毒を消す。高い水。', { effects: [heal(35), cure('poison')] });
+I('legend-water', '伝説の水', D, 400, 'legendary', '🌊', 'HP全回復。飲むと最大HPが+8（最大3回まで）。', { effects: [healP(100), { t: 'perm', stat: 'maxHp', v: 8, max: 3 }], un: { p: 12 }, stock: 2 });
+I('energy', 'エナジードリンク', D, 80, 'common', '⚡', '攻撃力アップ3ターン。少し回復。', { effects: [st('atkUp', 3), heal(10)] });
+I('expired-energy', '賞味期限切れエナジードリンク', D, 25, 'common', '☠️', '攻撃力が5ターン上がる…かもしれない。外すと混乱。', { expired: true, effects: [maybe(0.6, [st('atkUp', 5), heal(20)], [msg('頭がぐるぐるする！'), st('confuse', 3)])] });
+I('isekai-coffee', '異世界コーヒー', D, 55, 'uncommon', '☕', '麻痺と混乱を治し、少し回復。', { effects: [cure('para'), cure('confuse'), heal(20)] });
+I('maou-coffee', '魔王ブレンドコーヒー', D, 150, 'rare', '🖤', '攻撃力+4ターン。代償に防御が2ターン下がる。', { effects: [st('atkUp', 4), st('defDown', 2)], un: { lv: 12 } });
+I('slime-soda', 'スライム味ソーダ', D, 40, 'common', '🟢', 'HPを回復。スライム系の敵が仲間だと思って攻撃をためらう。', { effects: [heal(25), { t: 'tagSkip', tag: 'slime' }] });
+I('dragon-energy', 'ドラゴンエナジー', D, 300, 'epic', '🐉', '攻撃力5ターン。飲むと攻撃力が+1（最大3回）。', { effects: [st('atkUp', 5), heal(50), { t: 'perm', stat: 'baseAtk', v: 1, max: 3 }], un: { lv: 11 }, stock: 3 });
+I('hero-sports', '勇者専用スポーツドリンク', D, 120, 'rare', '🏅', '防御力4ターン上昇。HP回復。', { effects: [st('defUp', 4), heal(40)], stock: 4, un: { lv: 6 } });
+I('tear-juice', '涙味のジュース', D, 35, 'common', '😢', 'しょっぱい。HP回復と混乱解除。', { effects: [heal(30), cure('confuse')] });
+I('eternal-tea', '永遠に冷たいお茶', D, 70, 'uncommon', '🍵', '敵にぶつけると氷ダメージ。飲めば回復。', { effects: [dmg(30, 'ice'), heal(20)] });
+I('hot-tea', '熱すぎる紅茶', D, 65, 'uncommon', '🫖', '敵にかけると火ダメージ。', { effects: [dmg(35, 'fire')], field: false });
+I('clear-cola', '透明なコーラ', D, 95, 'uncommon', '🫧', '次の攻撃が必ず会心になる。', { effects: [{ t: 'nextCrit' }], field: false });
+I('dream-milk', '夢が見られる牛乳', D, 130, 'uncommon', '🌙', 'HPを大きく回復。30%で眠ってしまう（麻痺）。', { effects: [heal(90), maybe(0.3, [st('para', 1), msg('ぐっすり夢を見てしまった…')], [])] });
+I('maker-halfdrunk', '製作者の飲みかけ', 'gag', 200, 'rare', '🥤', '製作者の飲みかけ。HP回復と攻撃力アップ。', { maker: true, effects: [heal(40), st('atkUp', 3), { t: 'story', id: 'makerDrink' }] });
+
+/* ---------- 食品 ---------- */
+const F = 'food';
+I('onigiri', 'おにぎり（異世界産）', F, 25, 'common', '🍙', '具は不明。HPを回復。', { effects: [heal(40)] });
+I('drink-curry', '飲むカレー', F, 75, 'uncommon', '🍛', 'HP回復と攻撃力アップ。', { effects: [heal(60), st('atkUp', 3)] });
+I('dragon-jerky', 'ドラゴンジャーキー', F, 140, 'rare', '🥩', 'HP回復と防御力アップ。噛みごたえ抜群。', { effects: [heal(80), st('defUp', 4)], un: { lv: 8 } });
+I('slime-jelly', '食用スライム', F, 35, 'common', '🍮', 'ぷるぷる。HPと毒を回復。', { effects: [heal(35), cure('poison')] });
+I('expired-bento', '賞味期限切れ弁当', F, 20, 'common', '🍱', '大回復か、毒と攻撃ダウン。', { expired: true, effects: [maybe(0.5, [heal(100)], [msg('お腹が…！'), st('poison', 5), st('atkDown', 3)])] });
+I('negi-yaki', 'ネギ焼き', F, 90, 'uncommon', '🥞', 'HP回復と次の攻撃が会心。', { effects: [heal(50), { t: 'nextCrit' }] });
+I('manju', '異世界まんじゅう', F, 50, 'common', '🥟', 'HP回復。ときどき小銭が入っている。', { effects: [heal(45), maybe(0.25, [{ t: 'gold', v: 12 }], [])] });
+
+/* ---------- 魔法道具 ---------- */
+const M = 'magic';
+I('fire-scroll', '炎の巻物', M, 100, 'uncommon', '📜', '敵に火ダメージ（戦闘中のみ）。', { effects: [dmg(60, 'fire')], field: false });
+I('ice-scroll', '氷の巻物', M, 100, 'uncommon', '❄️', '氷ダメージ＋敵の攻撃力を下げる。', { effects: [dmg(45, 'ice'), est('atkDown', 3)], field: false });
+I('thunder-scroll', '雷の巻物', M, 140, 'rare', '⚡', '雷ダメージ。30%で麻痺。', { effects: [dmg(70, 'thunder'), est('para', 2, 0.3)], field: false, un: { lv: 7 } });
+I('smoke-ball', 'けむり玉', M, 70, 'common', '💨', 'この戦闘中、逃走成功率が大きく上がる。', { effects: [{ t: 'fleeUp', v: 0.4 }], field: false });
+I('mirror-shard', '鏡の欠片', M, 120, 'uncommon', '🪞', '次の敵の攻撃を60%反射する。', { effects: [{ t: 'reflect' }], field: false });
+I('sleep-powder', 'しびれ粉', M, 90, 'uncommon', '🧂', '80%で敵を麻痺させる。', { effects: [est('para', 3, 0.8)], field: false });
+I('armor-spray', '装甲スプレー', M, 80, 'common', '🧴', '敵の防御力を4ターン下げる。', { effects: [est('defDown', 4)], field: false });
+
+/* ---------- ネタ商品 ---------- */
+const G = 'gag';
+I('nothing-stone', '何も起きない石', G, 5, 'common', '🪨', '何も起きない。それが仕様。', { type: 'collect', effects: [msg('石を見つめた。何も起きなかった。')] });
+I('fancy-stone', '高級な石', G, 500, 'rare', '💎', '高いだけの石。投げれば痛い。', { type: 'collect', effects: [dmg(45, null)], field: false, consumeOnUse: true });
+I('hero-receipt', '勇者の領収書', G, 10, 'common', '🧾', '経費で一部落ちる。', { effects: [{ t: 'gold', v: 6 }, msg('経費精算！ 少しだけ戻ってきた。')] });
+I('maou-card', '魔王の名刺', G, 40, 'uncommon', '🪪', '名刺交換で経験値が少し入る。', { effects: [{ t: 'exp', v: 20 }, { t: 'flag', k: 'maouCard' }, msg('魔王の名刺には「何かあったら電話してね」と書いてある。')], stock: 3 });
+I('canned-air', '空気の缶詰', G, 20, 'common', '🥫', '異世界の澄んだ空気。HP+10。', { effects: [heal(10), msg('プシュッ。意外と爽やか。')] });
+I('spare-button', '予備の予備のボタン', G, 30, 'uncommon', '🔘', '押してもいい。押さなくてもいい。', { type: 'collect', effects: [{ t: 'exp', v: 3 }, msg('ポチッ。……どこかで何かが動いた気がする。')] });
+I('endless-receipt', '無限に長いレシート', G, 60, 'uncommon', '📃', '敵に巻き付けて60%で麻痺させる。', { effects: [est('para', 2, 0.6), msg('レシートが延々と敵に絡みつく！')], field: false });
+I('manual', '自販機の取扱説明書', G, 35, 'common', '📘', '読むとヒントが書いてある。', { type: 'collect', effects: [{ t: 'fn', name: 'hint' }] });
+I('manual-manual', '取扱説明書の取扱説明書', G, 120, 'rare', '📗', '読み方が書いてある。ネタ商品を全部集めると…？', { type: 'collect', effects: [{ t: 'fn', name: 'bonusEnding' }], un: { p: 8 } });
+I('maker-kuroreki', '製作者の黒歴史', G, 150, 'rare', '📕', '読むと恥ずかしくて自分の攻撃力が下がるが、敵も悶絶して混乱する。', { maker: true, effects: [st('atkDown', 2), est('confuse', 3, 1), { t: 'story', id: 'kuroreki' }] });
+I('maker-wallet', '製作者の財布', G, 300, 'rare', '👛', '中身は60〜420G。ギャンブル。', { maker: true, effects: [{ t: 'goldRand', min: 60, max: 420 }, { t: 'story', id: 'wallet' }], stock: 1 });
+I('maker-manuscript', '製作者の原稿', G, 220, 'rare', '📝', '読むと経験値80。ネタバレに注意。', { maker: true, effects: [{ t: 'exp', v: 80 }, { t: 'story', id: 'manuscript' }], stock: 1, unique: true });
+I('returned-gacha', '返品されたガチャ券', G, 80, 'uncommon', '🎟️', '一回回せる。返品された運の味がする。', { effects: [{ t: 'gacha', tier: 'normal' }] });
+I('maybe-legend', '「たぶん伝説のアイテム」', 'mystery', 250, 'mystery', '❔', 'たぶん伝説。たぶん。', { effects: [{ t: 'fn', name: 'maybeLegend' }], hidden: true, flagUnlock: 'newItem', stock: 1 });
+I('complaint-ticket', '文句券', G, 25, 'common', '🎫', '使うと自販機が文句を言いながら少し値引きしてくれる。', { effects: [{ t: 'fn', name: 'vmComplain' }], field: true, battle: false });
+I('some-part', '何かの部品', G, 45, 'common', '⚙️', 'どこの部品かは不明。機械系の敵に投げると大ダメージ。', { effects: [dmg(20, null, { tag: 'machine', m: 3 })], field: false });
+I('half-world-ticket', '世界の半分の引換券（偽物）', G, 300, 'rare', '🎴', '偽物。だが魔王の一瞬の動揺を誘える。', { effects: [{ t: 'tagSt', tag: 'demon', s: 'para', n: 2, fail: '「偽物です」と書いてある。' }], field: false });
+I('maou-apology', '魔王の謝罪文', G, 90, 'uncommon', '💌', '悪魔系の敵の攻撃力を5ターン下げる。', { effects: [{ t: 'tagSt', tag: 'demon', s: 'atkDown', n: 5, fail: '魔王の謝罪文には誤字が多い。' }], field: false });
+I('hero-oldsave', '勇者の過去のセーブデータ', G, 150, 'rare', '💾', 'HPを50%回復。懐かしい記憶。', { effects: [healP(50), { t: 'story', id: 'oldsave' }], un: { p: 5 } });
+I('gag-crown', 'ネタ王の証', G, 1000, 'legendary', '👑', 'ネタ商品を制した者の証。所持中、ネタ商品が半額。', { type: 'collect', hold: { gagDiscount: 0.5 }, hidden: true, un: { gagAll: true }, effects: [msg('王冠がキラリと光った。')], stock: 1, unique: true });
+
+/* ---------- レア商品・呪物・謎 ---------- */
+const R = 'rare';
+I('hourglass', '時間を少し戻す砂時計', R, 900, 'epic', '⏳', '直前の敵の攻撃前のHPに戻す（戦闘中のみ）。', { effects: [{ t: 'rewind' }], field: false, un: { lv: 9 }, stock: 2 });
+I('fate-coin', '運命を曲げるコイン', R, 700, 'epic', '🪙', '表なら会心＋攻撃アップ。裏なら敵の防御が下がる。', { effects: [maybe(0.5, [{ t: 'nextCrit' }, st('atkUp', 3), msg('表だ！ 運命が味方した。')], [est('defDown', 3), msg('裏だ…でも敵は少し体勢を崩した。')])], field: false, un: { lv: 8 }, stock: 2 });
+I('future-receipt', '未来が書かれたレシート', R, 350, 'rare', '🧾', 'この戦闘中、敵の次の行動が見える。', { effects: [{ t: 'reveal' }], field: false, un: { lv: 6 } });
+I('vm-heart', '自販機の心臓部', R, 6000, 'legendary', '❤️', '脈打つ心臓。真のラスボスに挑むための鍵。', { type: 'key', un: { def: 'rampage-vm' }, stock: 1, unique: true });
+I('maou-seal-button', '魔王の封印ボタン', R, 1500, 'epic', '🔴', '悪魔系の敵を4ターン麻痺させ攻撃力も下げる。', { effects: [{ t: 'tagSt', tag: 'demon', s: 'para', n: 4, fail: '魔王専用だった。何も起きない。' }, { t: 'tagSt', tag: 'demon', s: 'atkDown', n: 4, silent: true }], field: false, un: { def: 'maou' }, stock: 2 });
+I('lucky-gacha-ball', '幸運のガチャ玉', R, 450, 'rare', '🔮', '割ると良いものが出る。たぶん。', { effects: [{ t: 'gacha', tier: 'lucky' }], un: { lv: 6 } });
+I('cursed-gold', '呪われた金貨', 'curse', 500, 'cursed', '🪙', '所持中、戦闘のゴールド+20%。ただし受けるダメージ+10%。', { type: 'collect', hold: { goldMult: 1.2, dmgTaken: 1.1 }, effects: [msg('金貨がカタカタ笑った。')], un: { p: 10 }, stock: 1, unique: true });
+I('contract', '返品できない契約書', 'curse', 800, 'cursed', '📄', '次の3戦：経験値1.5倍、ゴールド半分。返品不可。', { effects: [{ t: 'fn', name: 'contract' }], un: { lv: 10 }, field: true, battle: false });
+I('world-key', '世界の裏側の鍵', R, 8000, 'legendary', '🗝️', '世界の裏側を開く鍵。管理者の扉の先へ。', { type: 'key', un: { def: 'bug-mass' }, stock: 1, unique: true });
+I('maker-secret-file', '製作者の秘密ファイル', R, 2500, 'legendary', '🗂️', '読むと製作者の秘密がわかる。', { maker: true, effects: [{ t: 'story', id: 'secretFile' }, { t: 'flag', k: 'secretFile' }, { t: 'exp', v: 150 }], un: { flag: 'makerMet', lv: 15 }, stock: 1, unique: true });
+I('purple-juice', '謎の紫色のジュース', 'mystery', 77, 'mystery', '🍇', '何が起きるか分からない。毎回違う。', { effects: [{ t: 'fn', name: 'purpleJuice' }] });
+I('ura-can', '裏メニュー缶', 'mystery', 100, 'mystery', '🥫', '裏メニュー。HP回復と攻防アップ。', { effects: [healP(50), st('atkUp', 4), st('defUp', 4)], hidden: true, flagUnlock: 'seqUnlock', stock: 2 });
+I('phantom-can', '幻の缶', 'mystery', 0, 'mystery', '🌫️', '一瞬だけ現れた缶。HPを40回復する。', { noShop: true, effects: [heal(40)] });
+I('unknown-receipt', '見覚えのないレシート', 'mystery', 0, 'mystery', '🧾', '身に覚えのない購入履歴が印字されている。', { noShop: true, type: 'collect', effects: [{ t: 'story', id: 'receipt' }, msg('「購入者：あなた　日付：まだ来ていない日」')] });
+
+const ITEM = Object.fromEntries(ITEMS.map(i => [i.id, i]));
+const GAG_IDS = ITEMS.filter(i => i.cat === 'gag' && !i.hidden && !i.noShop).map(i => i.id);
+const MAKER_IDS = ITEMS.filter(i => i.maker).map(i => i.id);
+
+const HINTS = [
+  'ボスには「大技の予兆」が表示される。そんなときは防御だ。',
+  '賞味期限切れの商品は危険だが、安くて強い。',
+  'ネタ商品を全部集めると、いいことがあるらしい。',
+  '「伝説のネギ」は会心が出やすい。理由は不明。',
+  '機械系の敵には補充用レンチが効く。',
+  'アンデッドには聖水。ゾンビ店員にも効く。',
+  'ミミックには気をつけろ。所持品を盗まれる。倒せば取り戻せる。',
+  '魔王には、魔王向けの商品が効くらしい。',
+  'セールはゲーム内の行動回数で終わる。買いどき！',
+  '自販機をつつきすぎると、何かが起きる。',
+  'メンテナンスコードは、どこかで届くことがある。',
+  '同じ商品を何度も買うと、説明文が変わることがある。',
+  '特定の順番で飲み物を買うと、裏メニューが現れる。',
+  '「ばぐ」と入力してみたくなったら、レベル10以上になってからにしよう。',
+  '逃げる前に、けむり玉を使うと成功しやすい。'
+];
+
+/* =====================================================================
+   p2: 敵・実績・ストーリー・セリフ・戦闘イベント定義
+   ===================================================================== */
+const ENEMIES = [];
+/* パターン: [行動, 重み, {追加}] / 追加: m=倍率, n=ターン, c=確率, lo/hi=HP割合の範囲, txt=演出 */
+function E(id, name, icon, lv, desc, o) {
+  ENEMIES.push(Object.assign({
+    id, name, icon, lv, desc, hm: 1, am: 1, dm: 1, xm: 1, gm: 1,
+    tags: [], weak: null, res: null, drops: [], p: [['atk', 1]], boss: false, noFlee: false, say: []
+  }, o || {}));
+}
+/* ---- 序盤 ---- */
+E('slime', 'スライム', '🟢', 1, '草原にいるぷるぷるした生き物。', { hm: 0.8, am: 0.8, tags: ['slime'], p: [['atk', 6], ['msg', 1, { txt: 'ぷるぷる震えている。' }]], drops: [['small-potion', 0.25], ['slime-jelly', 0.15]], bio: '異世界で最も有名な最弱モンスター。自販機の最初のお客でもある。' });
+E('angry-slime', '怒ったスライム', '🔴', 2, '値上げに怒っている赤いスライム。', { am: 1.2, hm: 0.9, tags: ['slime'], p: [['atk', 5], ['heavy', 2]], drops: [['small-potion', 0.3]], bio: '怒りで赤くなる。冷やすと元に戻る。' });
+E('poison-slime', '毒スライム', '🟣', 3, '毒を吐くスライム。', { tags: ['slime'], p: [['atk', 4], ['poison', 3, { n: 3 }]], drops: [['antidote-herb', 0.35], ['slime-jelly', 0.2]], bio: '触るとピリピリする。解毒草を持っていこう。' });
+E('goblin', 'ゴブリン', '👺', 2, 'バランスの良い小鬼。', { p: [['atk', 5], ['heavy', 1], ['guard', 1]], drops: [['small-potion', 0.2], ['cloth-clothes', 0.08], ['onigiri', 0.15]], bio: '群れで行動するが、なぜか今日は一匹だった。' });
+E('thief-goblin', '盗賊ゴブリン', '🥷', 3, 'ゴールドを狙う小鬼。', { p: [['atk', 4], ['steal', 3]], drops: [['canned-air', 0.2], ['hero-receipt', 0.2]], bio: '倒せば盗んだゴールドを取り戻せる。' });
+E('hungry-bat', '空腹のコウモリ', '🦇', 2, '素早い。お腹が空いている。', { hm: 0.6, dm: 0.5, fast: 0.3, p: [['atk', 6]], drops: [['manju', 0.2]], say: ['お腹が減っている！'], bio: '素早く二度動くことがある。' });
+E('wild-chicken', '野生のニワトリ', '🐔', 1, '弱いが、まれに強烈な一撃。', { hm: 0.7, p: [['atk', 8], ['heavy', 1, { m: 3, txt: 'とっておきのコケコッコー！' }]], drops: [['onigiri', 0.3], ['negi-yaki', 0.1]], bio: 'まれに放つ必殺技は本気で痛い。' });
+E('lost-mushroom', '迷子のキノコ', '🍄', 3, '胞子をまき散らす。', { p: [['atk', 3], ['poison', 2], ['heal', 2], ['confuse', 1]], drops: [['antidote-herb', 0.25], ['strange-jelly', 0.15]], bio: '帰り道を探している。' });
+E('mini-golem', '小型ゴーレム', '🗿', 4, '硬いが動きは鈍い。', { dm: 1.8, hm: 1.2, am: 0.9, p: [['atk', 5], ['guard', 2]], drops: [['nothing-stone', 0.3], ['fancy-stone', 0.05]], bio: '倒すと石になる。もともと石だが。' });
+E('talking-grass', 'しゃべる草', '🌿', 1, '攻撃前にヒントを話す。', { hm: 0.6, p: [['hint', 3], ['atk', 3]], drops: [['antidote-herb', 0.3], ['small-potion', 0.2]], bio: '親切だが、攻撃もしてくる。' });
+/* ---- 中盤 ---- */
+E('mimic', 'ミミック', '📦', 6, '宝箱に擬態した敵。', { p: [['atk', 4], ['stealItem', 3], ['heavy', 1]], drops: [['potion', 0.3], ['returned-gacha', 0.12], ['hi-potion', 0.1]], say: ['宝箱だと思った？ 残念！'], bio: '盗んだアイテムは倒せば取り戻せる。' });
+E('zombie-clerk', 'ゾンビ店員', '🧟', 7, 'しつこい店員。', { am: 0.7, hm: 1.4, tags: ['undead'], weak: 'holy', p: [['atk', 4], ['heal', 3, { txt: '「いらっしゃいませぇ…」' }]], drops: [['hero-receipt', 0.3], ['expired-potion', 0.3], ['holy-water', 0.1]], bio: '勤続1000年。時給は不明。' });
+E('dark-merchant', '闇商人', '🕴️', 8, 'ゴールドを狙う怪しい商人。', { p: [['atk', 3], ['steal', 3, { txt: '「お代は結構。いただきます」' }]], drops: [['maou-card', 0.15], ['cursed-gold', 0.04], ['returned-gacha', 0.2]], bio: '自販機のライバルを自称している。' });
+E('goblin-mage', '魔法使いゴブリン', '🧙', 7, '魔法を使う小鬼。', { hm: 0.8, p: [['atk', 4, { m: 1.3, txt: '魔法弾を放った！' }], ['confuse', 2], ['heal', 1]], drops: [['fire-scroll', 0.25], ['mana-soda', 0.2]], bio: '魔法はまだ勉強中。' });
+E('skeleton-swordsman', 'スケルトン剣士', '💀', 9, '攻撃力の高い骸骨。', { am: 1.3, hm: 0.9, tags: ['undead'], weak: 'holy', p: [['atk', 5], ['heavy', 2]], drops: [['rusty-sword', 0.15], ['holy-water', 0.1]], bio: '腕は立つが骨身にしみる。' });
+E('wandering-armor', 'さまよう鎧', '🛡️', 10, '防御力が高い。強攻撃を放つ。', { dm: 1.6, p: [['atk', 4], ['heavy', 3], ['guard', 2]], weak: 'thunder', drops: [['iron-armor', 0.06], ['potion', 0.3]], bio: '中身は空っぽ。' });
+E('cursed-vm', '呪いの自販機', '🥫', 11, '商品を撃ち出して攻撃してくる。', { tags: ['machine'], weak: 'thunder', p: [['atk', 4, { txt: '缶を撃ち出してきた！' }], ['poison', 2, { txt: '怪しい缶を投げつけてきた！' }], ['para', 1], ['confuse', 1]], drops: [['some-part', 0.3], ['energy', 0.3], ['spare-button', 0.15]], bio: '同業者。まったく仲良くなれない。' });
+E('expired-dragon', '賞味期限切れドラゴン', '🐲', 12, '腐敗ブレスが危険。', { hm: 1.3, am: 1.1, tags: ['dragon'], weak: 'ice', p: [['atk', 4], ['heavy', 2, { txt: '火炎ブレス！', el: 'fire' }], ['poison', 2, { txt: '腐敗ブレス！' }]], drops: [['expired-energy', 0.4], ['dragon-jerky', 0.15], ['dragon-energy', 0.05]], bio: '賞味期限が切れたが気高い。' });
+E('black-slime', 'ブラックスライム', '⚫', 8, '耐久力の高いスライム。', { hm: 1.6, tags: ['slime'], weak: 'holy', p: [['atk', 5], ['guard', 1], ['heal', 1]], drops: [['slime-sword', 0.05], ['slime-armor', 0.05], ['strange-jelly', 0.3]], bio: '黒い。それだけで強そう。' });
+E('power-rat', '盗電ネズミ', '🐭', 6, '電気を食べて弱体化攻撃をしてくる。', { res: 'thunder', p: [['atk', 4], ['atkDownP', 2], ['defDownP', 2]], drops: [['some-part', 0.2], ['energy', 0.25]], bio: '自販機のコードをかじるので有害。' });
+/* ---- 上級 ---- */
+E('flame-knight', '炎の騎士', '🔥', 15, '火属性の騎士。', { weak: 'ice', res: 'fire', p: [['atk', 5], ['heavy', 2, { el: 'fire', txt: '炎の剣！' }], ['selfUp', 1]], drops: [['hi-potion', 0.3], ['fire-scroll', 0.3], ['fire-staff', 0.04]], bio: 'ちょっと熱い。' });
+E('ice-witch', '氷の魔女', '❄️', 16, '攻撃を弱める魔女。', { weak: 'fire', res: 'ice', p: [['atk', 3, { m: 1.2 }], ['atkDownP', 3, { n: 3 }], ['defDownP', 1], ['heal', 1]], drops: [['ice-scroll', 0.3], ['eternal-tea', 0.2]], bio: '永遠に冷たいお茶の原料を持つ。' });
+E('thunder-beast', '雷獣', '⚡', 18, '高威力の攻撃を行う。', { am: 1.4, res: 'thunder', p: [['atk', 4], ['heavy', 3, { m: 2, el: 'thunder' }], ['para', 1]], drops: [['thunder-scroll', 0.3], ['thunder-spear', 0.03]], bio: '雷鳴とともに現れる。' });
+E('cursed-hero', '呪われた勇者', '🗡️', 19, 'プレイヤーに似た能力を持つ。', { p: [['atk', 5], ['copy', 2], ['heavy', 1], ['selfUp', 1]], drops: [['hero-sword', 0.04], ['hi-potion', 0.3], ['cursed-gold', 0.08]], bio: '過去の誰かのなれの果て。' });
+E('dragon', 'ドラゴン', '🐉', 21, '高HP、高攻撃力。', { hm: 1.5, am: 1.2, tags: ['dragon'], weak: 'ice', res: 'fire', p: [['atk', 4], ['heavy', 2, { el: 'fire', txt: '炎のブレス！' }], ['guard', 1]], drops: [['dragon-jerky', 0.35], ['dragon-energy', 0.15], ['elixir', 0.1]], bio: '最強格のモンスター。意外と綺麗好き。' });
+E('ancient-machine', '古代の機械兵', '🤖', 20, '物理攻撃に強い。', { dm: 1.8, tags: ['machine'], weak: 'thunder', resPhys: 0.6, p: [['atk', 5], ['heavy', 2], ['guard', 1]], drops: [['some-part', 0.5], ['wrench', 0.03]], bio: '雷と補充用レンチが弱点。' });
+E('dimension-merchant', '次元の商人', '🌀', 22, '戦闘中に行動パターンを変える。', { rot: [[['atk', 4], ['steal', 2]], [['heavy', 3], ['seal', 2]]], p: [['atk', 1]], drops: [['lucky-gacha-ball', 0.08], ['fate-coin', 0.05], ['returned-gacha', 0.3]], bio: '3ターンごとに別人になる。' });
+E('returned-maou', '返品された魔王', '😈', 24, '時々弱気になる。', { hm: 1.5, am: 1.3, tags: ['demon'], weak: 'holy', p: [['atk', 4], ['heavy', 3], ['timid', 2]], drops: [['maou-card', 0.4], ['maou-apology', 0.3], ['half-world-ticket', 0.3]], bio: '「返品されたくない…」が口癖。' });
+E('time-slime', '時空スライム', '⏳', 23, '時間に干渉してくる。', { tags: ['slime'], p: [['atk', 4], ['timewarp', 2]], drops: [['hourglass', 0.05], ['strange-jelly', 0.3]], bio: '昨日のスライムが今日のスライムを倒す。' });
+E('void-seller', '虚無の販売員', '🕳️', 25, '商品も所持金も無に帰す。', { p: [['atk', 4], ['sellGold', 3], ['seal', 2], ['defDownP', 1]], drops: [['cursed-gold', 0.08], ['contract', 0.08], ['returned-gacha', 0.3], ['elixir', 0.15]], bio: 'あなたの財布を買い取りに来た。' });
+/* ---- ボス ---- */
+E('vm-guardian', '自販機の守護者', '🥫', 7, '自販機を守る機械の番人。', { boss: true, noFlee: true, hm: 2.2, am: 1.05, dm: 1.2, tags: ['machine'], weak: 'thunder', weakItems: ['some-part'],
+  big: { every: 4, t: 'heavy', m: 1.8, name: 'コインシュート' },
+  p: [['atk', 5], ['heavy', 2], ['guard', 1], ['selfUp', 1]], p2: [['atk', 4], ['heavy', 3], ['selfUp', 1]],
+  say: ['ここから先は、私を倒してからだ。', '外装が…曲がる…！', '補充…ありがとう…'],
+  drops: [['hi-potion', 1], ['some-part', 0.6]], req: { lv: 5 }, reqText: 'Lv5以上', story: 'guardian',
+  bio: '自販機を守る警備ユニット。お客様対応は苦手。' });
+E('maou', '魔王', '👑', 16, '世界を恐怖に陥れた魔王。ただし自販機の常連。', { boss: true, noFlee: true, hm: 2.2, am: 1.1, tags: ['demon'], weak: 'holy', weakItems: ['maou-coffee', 'half-world-ticket'],
+  big: { every: 4, t: 'heavy', m: 2.0, name: '暗黒サービス残業' },
+  p: [['atk', 5], ['heavy', 2], ['confuse', 1], ['atkDownP', 1]], p2: [['heavy', 3], ['selfUp', 1], ['timid', 1], ['atk', 3]],
+  say: ['我が名は魔王。……自販機の客でもある。', '余の本気を見せてやろう…！', '見事だ……最後に缶コーヒーをくれ……。'],
+  drops: [['elixir', 1], ['maou-card', 1]], req: { def: 'vm-guardian', lv: 12 }, reqText: '守護者撃破＆Lv12以上', ending: 'normal', story: 'maou',
+  bio: '世界征服より価格改定が気になる。' });
+E('rampage-vm', '暴走自販機', '🚨', 21, '制御を失った自販機。', { boss: true, noFlee: true, hm: 1.6, am: 1.05, tags: ['machine'], weak: 'thunder', weakItems: ['some-part'],
+  big: { every: 3, t: 'heavy', m: 2.1, name: 'ジャックポット乱射' },
+  p: [['atk', 4], ['poison', 2], ['para', 1], ['heavy', 2], ['summon', 1]], p2: [['heavy', 3], ['sellGold', 2], ['summon', 1], ['atk', 2]],
+  say: ['ERROR ERROR 全品半額 全品無料 全品死', '電源…ヲ…ヲヲヲ…', '……再起動シマス……'],
+  drops: [['elixir', 1], ['some-part', 1]], req: { def: 'maou' }, reqText: '魔王撃破', story: 'rampage',
+  bio: '魔王が倒れたあと、自販機の何かが外れた。' });
+E('maker-clone', '製作者の分身', '🧑‍💻', 24, '製作者の影。', { boss: true, noFlee: true, hm: 2.2, am: 1.05, weakItems: ['maker-kuroreki'],
+  big: { every: 4, t: 'heavy', m: 2.0, name: '仕様変更' },
+  p: [['atk', 4], ['copy', 2], ['msg', 1, { txt: '「ここ、まだ調整してないんだよね」' }], ['defDownP', 1]], p2: [['heavy', 3], ['copy', 2], ['msg', 1, { txt: '「バランス？ 知らない子ですね」' }]],
+  say: ['おっと、見つかっちゃった。', '調整が間に合ってない…！', '次の更新で直しておく…'],
+  drops: [['maker-kuroreki', 1], ['maker-wallet', 0.4]], req: { maker: 3 }, reqText: '製作者関連アイテムを3種発見', story: 'cloneBoss',
+  bio: '製作者の分身。実装が大変だった。' });
+E('bug-mass', 'バグの集合体', '👾', 18, '世界の不具合が固まった存在。', { boss: true, noFlee: true, hm: 2.0, am: 1.1, tags: ['bug'], hidden: true,
+  p: [['atk', 3], ['glitch', 3], ['heavy', 2]], p2: [['glitch', 4], ['heavy', 2], ['atk', 2]],
+  big: { every: 5, t: 'heavy', m: 1.8, name: 'NULL POINTER' },
+  say: ['ﾊﾞ■■ﾊﾞｸﾞ■ｯ', '値が…おかしい…！', '■■■■ 保存シマセン ■■■■'],
+  drops: [['unknown-receipt', 0.6], ['spare-button', 1]], req: { flag: 'debugCmd', lv: 10 }, reqText: '???', secret: true, story: 'bug',
+  bio: 'ここまで読んだあなたは、もうバグではなく仕様である。' });
+E('admin', '異世界の管理者', '🧿', 27, '異世界を管理する存在。', { boss: true, noFlee: true, hm: 1.5, am: 1.05,
+  big: { every: 4, t: 'heavy', m: 2.0, name: '管理者権限' },
+  p: [['atk', 5], ['heavy', 2], ['defDownP', 1], ['atkDownP', 1], ['seal', 1]], p2: [['heavy', 3], ['heal', 1], ['selfUp', 1], ['atk', 2]],
+  say: ['この世界に不具合は許されない。', '権限が…足りない？', '管理者を…ログアウト…'],
+  drops: [['elixir', 1], ['hi-potion', 1]], req: { def: 'rampage-vm' }, reqText: '暴走自販機撃破＆バグの集合体撃破', story: 'admin',
+  reqFn: () => S.defeated['bug-mass'] > 0,
+  bio: '世界にそっと設定ファイルを置いた者。' });
+E('true-owner', '自販機の真の所有者', '🕴️', 29, '自販機の本当の持ち主。', { boss: true, noFlee: true, hm: 1.5, am: 1.05,
+  big: { every: 4, t: 'heavy', m: 2.1, name: '所有権の主張' },
+  p: [['atk', 5], ['heavy', 2], ['sellGold', 2], ['counter', 1]], p2: [['heavy', 3], ['sellGold', 2], ['counter', 1], ['selfUp', 1]],
+  say: ['それは、私の自販機だ。', '返してもらおう。', '………好きに使えばいい。'],
+  drops: [['contract', 1], ['elixir', 1]], req: { def: 'admin', has: 'world-key' }, reqText: '管理者撃破＆世界の裏側の鍵を所持', story: 'owner',
+  bio: 'なぜ自販機を異世界へ置いたのか。' });
+E('maker', '製作者本人', '✍️', 30, 'このゲームを作った人。', { boss: true, noFlee: true, hm: 1.5, am: 1.05, hidden: true, maker: true,
+  big: { every: 3, t: 'heavy', m: 2.0, name: 'デバッグ実行' },
+  p: [['msg', 1, { txt: '「ちょっと待って、まだ調整中」' }], ['atk', 4], ['heavy', 2], ['confuse', 1], ['heal', 1], ['copy', 1]], p2: [['heavy', 3], ['msg', 1, { txt: '「バランス崩壊してもリリースしちゃえ」' }], ['atk', 3], ['heal', 1]],
+  say: ['ようこそ。ここまで来るとは思わなかった。', '調整が…間に合わない…！', '完成…ありがとう…。'],
+  drops: [['maker-secret-file', 0.5], ['elixir', 1]], req: { def: 'maker-clone', maker: 4 }, reqText: '???', secret: true, ending: 'hidden', story: 'makerBoss',
+  reqFn: () => S.defeated['true-owner'] > 0,
+  bio: '宿題の提出期限に追われている。' });
+E('end-seller', '終末を売る商人', '☄️', 33, '世界の終わりを売る。', { boss: true, noFlee: true, hm: 1.4, am: 1.05,
+  big: { every: 4, t: 'heavy', m: 2.3, name: 'ラストセール' },
+  p: [['atk', 5], ['heavy', 3], ['sellGold', 2], ['poison', 1], ['seal', 1]], p2: [['heavy', 4], ['sellGold', 2], ['selfUp', 1]],
+  say: ['最後の大特価、ご覧にいれましょう。', '在庫一掃セール！', '完売…ご利用ありがとうございました…'],
+  drops: [['elixir', 1], ['dragon-energy', 1]], req: { def: 'true-owner' }, reqText: '真の所有者撃破', story: 'endSeller',
+  bio: '終末を定価で売っている。' });
+E('vm-heart', '自販機の心臓', '❤️‍🔥', 31, '自販機の中枢。', { boss: true, noFlee: true, hm: 1.5, am: 1.2, tags: ['machine'], weak: 'thunder',
+  big: { every: 4, t: 'heavy', m: 2.1, name: 'ハートビート・ラッシュ' },
+  p: [['atk', 5], ['heavy', 2], ['heal', 1], ['guard', 1]], p2: [['heavy', 3], ['summon', 1], ['sellGold', 1], ['atk', 2]],
+  say: ['ドクン…ドクン…帰りたい…ずっと、帰りたかった…。', '私は…ただ、飲み物を売りたいだけなのに…！', 'ありがとう…さようなら…。'],
+  drops: [['elixir', 1], ['legend-water', 1]], req: { def: 'rampage-vm', has: 'vm-heart', lv: 22 }, reqText: '暴走自販機撃破・自販機の心臓部所持・Lv22以上', ending: 'true', story: 'heart',
+  bio: '自販機の心臓。ずっと鼓動していた。' });
+
+const ENEMY = Object.fromEntries(ENEMIES.map(e => [e.id, e]));
+const ACTION_LABEL = { atk: '攻撃', heavy: '強攻撃', guard: '防御', heal: '回復', poison: '毒攻撃', confuse: '混乱攻撃', para: '麻痺攻撃', steal: 'ゴールドを狙う', stealItem: 'アイテムを狙う', seal: 'アイテム封印', selfUp: '力を溜める', atkDownP: '弱体化攻撃', defDownP: '防御崩し', flee: '逃走', boom: '自爆', summon: '分身召喚', counter: '反撃の構え', copy: 'まねっこ', msg: '何か考えている', hint: '話しかけてくる', timid: '弱気', glitch: 'バグ', timewarp: '時空干渉', sellGold: '売りつけ' };
+const TELEGRAPH = ['heavy', 'boom', 'counter', 'seal'];
+
+/* =================== 実績 =================== */
+const ACHS = [];
+function ACH(id, name, desc, cond, reward, o) { ACHS.push(Object.assign({ id, name, desc, cond, reward: reward || {} }, o || {})); }
+const defd = id => (S.defeated[id] || 0) > 0;
+ACH('first-buy', '初めてのお買い物', '初めて商品を購入する。', () => S.stats.purchases >= 1, { gold: 20 });
+ACH('regular', '常連客', '20回購入する。', () => S.stats.purchases >= 20, { gold: 100 });
+ACH('broke', '金欠勇者', '所持金が10G以下になる。', () => S.stats.purchases >= 1 && S.player.gold <= 10, { exp: 10 });
+ACH('rich', '大金持ち', '所持金が3000Gを超える。', () => S.player.gold >= 3000, { exp: 100 });
+ACH('first-win', '初勝利', '初めて敵を倒す。', () => S.stats.wins >= 1, { gold: 20 });
+ACH('first-loss', '初敗北', '初めて敗北する。', () => S.stats.losses >= 1, { exp: 10 });
+ACH('first-lv', 'レベルアップ', 'レベル2になる。', () => S.player.level >= 2, { gold: 20 });
+ACH('strong', '強くなった勇者', 'レベル10に到達する。', () => S.player.level >= 10, { gold: 200 });
+ACH('lv30', '歴戦の勇者', 'レベル30に到達する。', () => S.player.level >= 30, { gold: 1000 });
+ACH('leek', 'ネギの力', '伝説のネギを入手する。', () => S.disc.items['legendary-leek'], { gold: 50 });
+ACH('beyond-expiry', '賞味期限の向こう側', '賞味期限切れ商品を使用する。', () => S.stats.expiredUsed >= 1, { exp: 20 });
+ACH('no-return', '返品不可', '返品された商品を入手する。', () => S.disc.items['returned-legend'] || S.disc.items['returned-gacha'], { gold: 50 });
+ACH('maou', '魔王討伐', '魔王を倒す。', () => defd('maou'), { gold: 500 });
+ACH('vm-maniac', '自販機マニア', '商品図鑑の収集率が50%以上。', () => dexRate('item').rate >= 0.5, { gold: 300 });
+ACH('collector', 'コレクター', '全カテゴリの商品を発見する。', () => CATS.filter(c => c.id !== 'all').every(c => ITEMS.some(i => i.cat === c.id && S.disc.items[i.id])), { gold: 200 });
+ACH('truth', '隠された真実', '製造記録を発見する。', () => S.disc.story.record1, { exp: 50 });
+ACH('flee-master', '逃走の達人', '逃走に5回成功する。', () => S.stats.flees >= 5, { gold: 50 });
+ACH('thrifty', '倹約家', '買い物をせずに5連勝する。', () => S.stats.winsNoBuy >= 5, { gold: 100 });
+ACH('big-spender', '大盤振る舞い', '一度の購入で1000G以上使う。', () => S.stats.bigSpend >= 1000, { exp: 100 });
+ACH('maker-meet', '製作者との遭遇', '製作者関連イベントを発生させる。', () => S.flags.makerMet, { exp: 50 });
+ACH('vm-friend', '自販機の友達', '不思議・隠しイベントを6種類見る。', () => countEvents(['horror', 'secret']) >= 6, { gold: 150 });
+ACH('legend-collector', '伝説のコレクター', 'レジェンダリー商品を3種入手する。', () => ITEMS.filter(i => i.rar === 'legendary' && S.disc.items[i.id]).length >= 3, { gold: 400 });
+ACH('bug-finder', 'バグ発見者', 'バグの集合体を倒す。', () => defd('bug-mass'), { gold: 400 });
+ACH('no-buy', '何も買わない勇者', '買わずに自販機を5回訪れる。', () => S.stats.noBuyVisits >= 5, { gold: 30 });
+ACH('backside', '世界の裏側', '隠しストーリーを解放する。', () => S.disc.story.backside, { exp: 100 }, { secret: true });
+ACH('vm-poke', 'つつき名人', '自販機を30回つつく。', () => S.stats.vmClicks >= 30, { gold: 30 }, { secret: true });
+ACH('konami', 'あの呪文', '秘密のコマンドを入力する。', () => S.flags.konami, { gold: 100 }, { secret: true });
+ACH('boss-guard', '番人突破', '自販機の守護者を倒す。', () => defd('vm-guardian'), { gold: 150 });
+ACH('end-normal', '通常エンディング', '魔王を倒してエンディングを見る。', () => S.flags['end:normal'], { gold: 300 });
+ACH('end-true', '真エンディング', '自販機の心臓を倒す。', () => S.flags['end:true'], { gold: 2000 }, { secret: true });
+ACH('end-hidden', '隠しエンディング', '製作者を倒す。', () => S.flags['end:hidden'], { gold: 2000 }, { secret: true });
+ACH('end-bonus', 'おまけエンディング', 'ネタ商品を全て集めて取扱説明書の取扱説明書を読む。', () => S.flags['end:bonus'], { gold: 1000 }, { secret: true });
+ACH('gag-all', 'ネタ商品コンプリート', 'ネタ商品をすべて発見する。', () => gagAll(), { gold: 300 });
+ACH('complete', '完全制覇', '他の実績をすべて解除する。', () => ACHS.filter(a => a.id !== 'complete').every(a => S.ach[a.id]), { gold: 5000 });
+
+/* =================== ストーリー記録 =================== */
+const STORIES = [
+  { id: 'arrival', t: '転移の日', x: 'ある朝、自販機は見知らぬ草原に立っていた。電源はなぜか入っていた。釣り銭は足りている。誰が補充したのだろう。' },
+  { id: 'firstCustomer', t: '最初の客', x: '最初の客は旅人ではなく、スライムだった。スライムは水を買い、そのまま友達になった。' },
+  { id: 'serial', t: '製造番号', x: 'シリアル番号の下に、消えかけた刻印がある。「TEST UNIT」。' },
+  { id: 'record1', t: '製造記録 1/4', x: '「試作機。異世界での販売テスト用。回収予定：なし」' },
+  { id: 'record2', t: '製造記録 2/4', x: '「商品ラインナップは勇者向け。魔王向けは未定。予算が足りない」' },
+  { id: 'record3', t: '製造記録 3/4', x: '「内部に心臓部を設置。取り外し厳禁。理由：まだ決めていない」' },
+  { id: 'record4', t: '製造記録 4/4', x: '「設置者より：この自販機を、いつか元の世界へ帰す。それまで、売り続けること」' },
+  { id: 'guardian', t: '守護者', x: '守護者は自販機を守るために作られた。本来は盗難防止のための装置だった。' },
+  { id: 'maou', t: '魔王の事情', x: '魔王は世界征服よりも、冷たい缶コーヒーのために城を出ていた。' },
+  { id: 'rampage', t: '暴走', x: '魔王が倒れたとき、自販機の中の何かが外れた。「帰りたい」という声が聞こえた。' },
+  { id: 'voice', t: '内側の声', x: '自販機の内部から、誰かの声が聞こえる。「ここは…どこ…」' },
+  { id: 'shadow', t: '背後の影', x: '自販機の裏に、人影が映った。製作者だろうか。' },
+  { id: 'makerDrink', t: '飲みかけ', x: '製作者の飲みかけには、「締切3日前」とメモが貼られていた。' },
+  { id: 'kuroreki', t: '黒歴史', x: '黒歴史ノートの1ページ目：「最強の自販機を作る（設定：勇者が飲み物を買う）」。' },
+  { id: 'wallet', t: '製作者の財布', x: '財布の中には、締切の迫った領収書ばかりだった。' },
+  { id: 'manuscript', t: '製作者の原稿', x: '原稿には「ここから先は、まだ見つかっていないはずだった」と書かれている。' },
+  { id: 'receipt', t: '身に覚えのないレシート', x: '日付は未来。購入者名は空欄。品名は「帰り道」。' },
+  { id: 'oldsave', t: '過去のセーブデータ', x: '勇者はかつて、一度この世界に来ていたのかもしれない。' },
+  { id: 'cloneBoss', t: '製作者の分身', x: '分身は言った。「仕様はこうだけど、本当は帰りたいんだ。自販機も」' },
+  { id: 'bug', t: 'バグの記録', x: 'バグは、世界が直されなかった部分の集合体だった。誰も悪くない。' },
+  { id: 'admin', t: '管理者', x: '管理者は世界を守っていた。自販機は「イレギュラー」として登録されていた。' },
+  { id: 'owner', t: '真の所有者', x: '真の所有者は、自販機を捨てたのではなく、預けたのだと言った。' },
+  { id: 'makerBoss', t: '製作者本人', x: '「完成させるつもりだった。でも、遊んでくれる人がいると、直したくなるんだ」' },
+  { id: 'endSeller', t: '終末の商人', x: '終末は定価で売られていた。誰も買わなかったので、在庫が余った。' },
+  { id: 'heart', t: '自販機の心臓', x: '心臓は止まったのではなく、ようやく「休業中」の札を出した。' },
+  { id: 'secretFile', t: '秘密のファイル', x: 'ファイルの最後の一行：「この世界の価格設定に、製作者も自信がない」。' },
+  { id: 'backside', t: '世界の裏側', x: 'この世界の裏側には、無数のテストデータが眠っている。最初はただのテストデータだった。' }
+];
+const STORY = Object.fromEntries(STORIES.map(s => [s.id, s]));
+
+/* =================== 自販機のセリフ =================== */
+const LINES = {
+  welcome: ['いらっしゃいませ。異世界通貨にも対応しております。たぶん。', '勇者様、また来たんですか。ほかに店がないんですか？', 'お金を入れてください。愛情では動きません。', 'あなたの冒険、当店が実質スポンサーです。'],
+  idle: ['賞味期限？ 異世界にはその概念がありません。', 'その商品、本当に必要ですか？ 私は必要だと思います。売りたいので。', '売り切れです。私にも休憩する権利があります。（在庫はあります）', '……今、私の裏側を見ましたか？', '冷たい飲み物は冷たいうちにどうぞ。温かい飲み物は温かいうちにどうぞ。'],
+  buy: ['お買い上げありがとうございます。返品はできません。', 'またのご利用をお待ちしております。', 'そのアイテムを買う人、初めて見ました。', '毎度あり。懐は大丈夫ですか？'],
+  broke: ['お客様の残高では、夢と希望しか購入できません。', '魔王より先に、あなたの財布が倒れそうです。', 'お金を入れてください。愛情では動きません。', 'ツケはききません。異世界でもです。'],
+  rich: ['お金持ちですね。ちょっと高いのもどうですか？', 'この前より財布が重そうですね。私の気のせいでしょうか。'],
+  levelup: ['レベルアップおめでとうございます。次回から手数料が上がります。', 'また強くなりましたね。私の商品のおかげです。', '成長を祝して、特に何もありません。'],
+  win: ['勝ちましたね。当店の商品のおかげです。', '戦利品は買い物にお使いください。', 'おや、無事でしたか。残念です。いえ、良かったです。'],
+  lose: ['お客様がいなくなると売上が減るので、起きてください。', '蘇生サービスをご利用ですね。手数料をいただきます。'],
+  poke: ['つつかないでください。', 'お客様、何をなさっていますか？', 'ボタンではありません。そこはただの外装です。', '押すなら商品のボタンをお願いします。'],
+  nag: ['……買わないんですか？', '見るだけならタダですが、私は寂しいです。', 'その視線、買う気配ですね？ ね？'],
+  weaponLeek: ['そのネギ、本当に武器なんですか？', 'ネギを装備して自販機に来ないでください。'],
+  weaponTalking: ['その剣、私より口数が多いですね。'],
+  weaponWrench: ['それは私の補充用レンチです。返してください。'],
+  weaponFork: ['魔王のフォークですか。食事の時間ではありませんよ。'],
+  makerTalk: ['製作者？ ああ、あのいつも締切に追われている人ですね。'],
+  late: ['ここまで来るとは…私の商品、実は在庫が余っておりまして。']
+};
+
+/* =================== 戦闘イベント =================== */
+const BEV = [];
+function BE(id, name, when, o) { BEV.push(Object.assign({ id, name, when, w: 10, cond: null, run: async () => {} }, o)); }
+BE('enemy-sleep', '敵が寝ている', 'start', { w: 8, cond: () => !B.enemy.boss, run: async () => { B.enemySleep = 2; blog('✨ 敵は眠っている！ 最初の2ターンは動かない。', 'ev'); } });
+BE('enemy-trip', '敵が転ぶ', 'turn', { run: async () => { const d = Math.max(1, Math.floor(B.enemy.maxHp * 0.08)); damageEnemy(d, { silent: true }); blog(`✨ ${B.enemy.name}は足元の缶に転んだ！ ${d}ダメージ。`, 'ev'); } });
+BE('crit-chance', 'クリティカルチャンス', 'turn', { run: async () => { B.nextCrit = true; blog('✨ 敵に隙が！ 次の攻撃は会心になる！', 'ev'); } });
+BE('weapon-rampage', '武器の暴走', 'turn', { cond: () => (weapon() && weapon().atk >= 8), run: async () => { const r = calcPlayerAttack({ mult: 1.2 }); damageEnemy(r.dmg); blog(`✨ ${weapon().name}が勝手に暴れだし、追加で${r.dmg}ダメージ！`, 'ev'); } });
+BE('leek-glow', '伝説のネギが光る', 'turn', { w: 25, cond: () => S.equip.weapon === 'legendary-leek', run: async () => { healPlayer(15); B.nextCrit = true; blog('✨ 伝説のネギが光り輝く！ HP+15、次の攻撃は会心！', 'ev'); } });
+BE('expired-boom', '賞味期限切れ飲料が爆発', 'turn', { cond: () => ITEMS.some(i => i.expired && S.inv[i.id] > 0), run: async () => { const it = ITEMS.find(i => i.expired && S.inv[i.id] > 0); removeItem(it.id, 1); const d = Math.max(1, Math.floor(B.enemy.maxHp * 0.1)); damageEnemy(d, { silent: true }); hurtPlayer(Math.min(Math.floor(totalMaxHp() * 0.04), Math.max(0, S.player.hp - 1))); blog(`✨ カバンの中の「${it.name}」が爆発した！ 敵に${d}ダメージ、自分も少しダメージ。`, 'ev'); } });
+BE('enemy-shopper', '敵が商品を買いたがる', 'turn', { w: 8, run: async () => {
+  const drinks = ITEMS.filter(i => (i.cat === 'drink' || i.cat === 'food') && S.inv[i.id] > 0 && !i.expired);
+  if (!drinks.length) { blog(`✨ ${B.enemy.name}「それ、いくらですか？」……持ち合わせがない。`, 'ev'); return; }
+  const idx = await askChoice('敵が商品を欲しがっている', `${B.enemy.name}「飲み物を一本、売ってくれませんか？」`, [`${drinks[0].name}を売る（+40G）`, '断る']);
+  if (idx === 0) { removeItem(drinks[0].id, 1); addGold(40); setStatus(B.enemy, 'atkDown', 3); blog(`✨ ${B.enemy.name}は満足した！ 攻撃力が下がった。+40G`, 'ev'); }
+  else { setStatus(B.enemy, 'atkUp', 3); blog(`✨ ${B.enemy.name}は断られて怒っている！`, 'ev'); } } });
+BE('enemy-stares', '敵が自販機を見つめる', 'turn', { run: async () => { B.enemySkip = 1; blog(`✨ ${B.enemy.name}は遠くの自販機を見つめている…次の行動をスキップ。`, 'ev'); } });
+BE('maou-commentary', '魔王が実況する', 'turn', { run: async () => { addGold(8); blog('✨ 魔王の実況「おっと勇者、ここで渾身の一撃か！」 投げ銭 +8G', 'ev'); } });
+BE('maker-cheer', '製作者の応援', 'turn', { run: async () => { setStatus(S.player, 'atkUp', 3); blog('✨ 製作者「がんばれー！（画面外）」 攻撃力が上がった！', 'ev'); discoverStory('shadow'); S.flags.makerMet = true; } });
+BE('maker-hamper', '製作者の妨害', 'turn', { w: 6, run: async () => { S.flags.makerMet = true; if (chance(0.5)) { setStatus(S.player, 'confuse', 1); blog('✨ 製作者「あ、変数名間違えた」 勇者は混乱した！', 'ev'); } else { const h = Math.floor(B.enemy.maxHp * 0.1); B.enemy.hp = Math.min(B.enemy.maxHp, B.enemy.hp + h); blog(`✨ 製作者「あ、HP設定ミスってた」 敵のHPが${h}回復！`, 'ev'); } } });
+BE('weak-point', '敵の弱点発見', 'turn', { run: async () => { B.nextCrit = true; setStatus(B.enemy, 'defDown', 2); blog('✨ 弱点を発見！ 敵の防御が下がり、次は会心！', 'ev'); } });
+BE('miracle-dodge', '奇跡の回避', 'turn', { run: async () => { B.dodgeNext = true; blog('✨ 足元がふらついたが、次の攻撃は奇跡的に避けられそうだ！', 'ev'); } });
+BE('enemy-apologize', '敵が謝罪する', 'turn', { cond: () => !B.enemy.boss, run: async () => { setStatus(B.enemy, 'atkDown', 3); blog(`✨ ${B.enemy.name}「すみません、やっぱり戦いたくないです…」 攻撃力が下がった。`, 'ev'); } });
+BE('enemy-manual', '敵が説明書を読む', 'turn', { cond: () => !B.enemy.boss, run: async () => { setStatus(B.enemy, 'para', 2); blog(`✨ ${B.enemy.name}は自分の取扱説明書を読み始めた…（2ターン行動不能）`, 'ev'); } });
+BE('enemy-price', '敵が値上げに怒る', 'turn', { cond: () => S.stats.purchases >= 10, run: async () => { setStatus(B.enemy, 'atkUp', 4); blog(`✨ ${B.enemy.name}「あの自販機、値上げしただろ！」 敵が強化された！`, 'ev'); } });
+BE('vm-support', '自販機の遠隔支援', 'turn', { w: 30, cond: () => S.player.hp < totalMaxHp() * 0.35 && !B.vmSupport, run: async () => { B.vmSupport = true; healPlayer(40); blog('✨ 自販機「サービスです。次回の購入でご返済ください。」 HP+40', 'ev'); } });
+BE('fake-enemy', '敵の偽物が現れる', 'turn', { w: 6, cond: () => !B.enemy.shield, run: async () => { B.enemy.shield = Math.floor(B.enemy.maxHp * 0.15); blog(`✨ ${B.enemy.name}の偽物が現れ、盾になった！ （シールド${B.enemy.shield}）`, 'ev'); } });
+BE('time-warp', '時空が乱れる', 'turn', { w: 5, run: async () => { B.extraAction = true; blog('✨ 時空が乱れ、行動順が入れ替わった！ もう一度行動できる！', 'ev'); } });
+BE('boss-secret', '隠しボス専用演出', 'start', { w: 100, cond: () => B.enemy.secret, run: async () => { flashFx('glitch'); blog('✨ 画面が歪んだ。……ここは、見つかってはいけない場所だった。', 'ev'); } });
+
+/* =====================================================================
+   p3: ユーティリティ・状態・所持品・効果・状態異常・実績・レベル
+   ===================================================================== */
+const $ = (s, r) => (r || document).querySelector(s);
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+const rnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const chance = p => Math.random() < p;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const reducedMotion = () => (S && S.settings && S.settings.calm) || (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+const wait = ms => new Promise(r => setTimeout(r, reducedMotion() ? Math.min(ms, 40) : ms));
+function wpick(list, wf) { const tot = list.reduce((a, x) => a + (wf(x) || 0), 0); if (tot <= 0) return null; let r = Math.random() * tot; for (const x of list) { r -= (wf(x) || 0); if (r <= 0) return x; } return list[list.length - 1]; }
+const isEquip = it => it && (it.type === 'weapon' || it.type === 'armor');
+
+/* ---------- ゲーム状態 ---------- */
+let S, B = null;
+function newState() {
+  return {
+    ver: SAVE_VER,
+    player: { name: '勇者（仮）', level: 1, exp: 0, gold: 300, hp: 100, maxHp: 100, baseAtk: 10, baseDef: 5, status: {} },
+    inv: { potion: 2, 'wooden-stick': 1 },
+    equip: { weapon: 'wooden-stick', armor: null },
+    stats: { purchases: 0, wins: 0, losses: 0, flees: 0, spent: 0, bigSpend: 0, expiredUsed: 0, buyStreak: 0, noBuyVisits: 0, winsNoBuy: 0, vmClicks: 0, battles: 0, maxGold: 300, explores: 0 },
+    disc: { items: { potion: 1, 'wooden-stick': 1 }, enemies: {}, events: {}, story: {} },
+    buyCount: {}, ach: {}, flags: {}, defeated: {}, stock: {}, mods: [], blocked: {},
+    clock: 0, lastEvent: null, evCd: {}, evDone: {}, buyOrder: [], permUsed: {},
+    serial: 'VM-0001', vmName: '自販機', nameSwap: null, descOverride: {}, quota: null, rebel: false, atari: false,
+    contract: 0, restockAt: 0, announced: {}, lastBuyId: null, recentLines: [], log: [],
+    settings: { bgm: true, sfx: true, calm: false }
+  };
+}
+S = newState();
+
+/* ---------- セーブ/ロード ---------- */
+function saveGame() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(S)); return true; } catch (e) { return false; } }
+function numOr(v, d) { return typeof v === 'number' && isFinite(v) ? v : d; }
+function sanitizeState(d) {
+  const s = newState();
+  if (!d || typeof d !== 'object') return s;
+  const p = d.player || {};
+  for (const k of ['level', 'exp', 'gold', 'hp', 'maxHp', 'baseAtk', 'baseDef']) s.player[k] = numOr(p[k], s.player[k]);
+  s.player.name = typeof p.name === 'string' ? p.name.slice(0, 12) : s.player.name;
+  s.player.level = clamp(Math.floor(s.player.level), 1, MAX_LV);
+  s.player.gold = Math.max(0, Math.floor(s.player.gold));
+  s.player.exp = Math.max(0, Math.floor(s.player.exp));
+  s.player.status = {};
+  s.inv = {};
+  for (const [k, v] of Object.entries(d.inv || {})) if (ITEM[k] && numOr(v, 0) > 0) s.inv[k] = Math.floor(v);
+  s.equip = { weapon: null, armor: null };
+  const eq = d.equip || {};
+  if (ITEM[eq.weapon] && ITEM[eq.weapon].type === 'weapon' && s.inv[eq.weapon]) s.equip.weapon = eq.weapon;
+  if (ITEM[eq.armor] && ITEM[eq.armor].type === 'armor' && s.inv[eq.armor]) s.equip.armor = eq.armor;
+  for (const k of Object.keys(s.stats)) s.stats[k] = numOr((d.stats || {})[k], s.stats[k]);
+  const dd = d.disc || {};
+  s.disc.items = {}; for (const k of Object.keys(dd.items || {})) if (ITEM[k]) s.disc.items[k] = 1;
+  s.disc.enemies = {}; for (const k of Object.keys(dd.enemies || {})) if (ENEMY[k]) s.disc.enemies[k] = 1;
+  s.disc.events = {}; for (const k of Object.keys(dd.events || {})) s.disc.events[k] = numOr(dd.events[k], 1);
+  s.disc.story = {}; for (const k of Object.keys(dd.story || {})) if (STORY[k]) s.disc.story[k] = 1;
+  for (const k of ['buyCount', 'stock', 'permUsed', 'evCd', 'announced', 'blocked']) { s[k] = {}; for (const [a, b] of Object.entries(d[k] || {})) if (typeof b === 'number' || typeof b === 'boolean' || (k === 'blocked' && b && typeof b === 'object')) s[k][a] = b; }
+  s.ach = {}; for (const [k, v] of Object.entries(d.ach || {})) if (ACHS.some(a => a.id === k)) s.ach[k] = v;
+  s.flags = {}; for (const [k, v] of Object.entries(d.flags || {})) if (typeof v !== 'object') s.flags[k] = v;
+  s.defeated = {}; for (const [k, v] of Object.entries(d.defeated || {})) if (ENEMY[k]) s.defeated[k] = numOr(v, 1);
+  s.evDone = {}; for (const k of Object.keys(d.evDone || {})) s.evDone[k] = true;
+  s.mods = Array.isArray(d.mods) ? d.mods.filter(m => m && typeof m.mult === 'number' && typeof m.until === 'number') : [];
+  s.clock = Math.max(0, numOr(d.clock, 0));
+  s.buyOrder = Array.isArray(d.buyOrder) ? d.buyOrder.filter(x => ITEM[x]).slice(-6) : [];
+  s.serial = typeof d.serial === 'string' ? d.serial.slice(0, 20) : s.serial;
+  s.vmName = typeof d.vmName === 'string' ? d.vmName.slice(0, 20) : s.vmName;
+  s.contract = Math.max(0, numOr(d.contract, 0));
+  s.restockAt = numOr(d.restockAt, 0);
+  s.lastEvent = typeof d.lastEvent === 'string' ? d.lastEvent : null;
+  s.quota = d.quota && typeof d.quota === 'object' ? d.quota : null;
+  s.descOverride = {}; s.nameSwap = null; // 一時表示は復元しない
+  s.log = Array.isArray(d.log) ? d.log.filter(x => x && typeof x.t === 'string').slice(-80) : [];
+  const st = d.settings || {};
+  s.settings = { bgm: st.bgm !== false, sfx: st.sfx !== false, calm: !!st.calm };
+  if (!s.equip.weapon && s.inv['wooden-stick']) s.equip.weapon = 'wooden-stick';
+  s.player.maxHp = Math.max(50, s.player.maxHp);
+  s.player.hp = clamp(s.player.hp, 1, s.player.maxHp + 400);
+  return s;
+}
+function loadGame() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return false;
+    const d = JSON.parse(raw);
+    if (!d || d.ver !== SAVE_VER) return false;
+    S = sanitizeState(d);
+    S.player.hp = clamp(S.player.hp, 1, totalMaxHp());
+    return true;
+  } catch (e) { S = newState(); return false; }
+}
+
+/* ---------- ログ ---------- */
+function log(text, cls) {
+  S.log.push({ t: text, c: cls || '' });
+  if (S.log.length > 80) S.log.shift();
+  if (typeof renderTicker === 'function') renderTicker();
+}
+
+/* ---------- 装備・ステータス ---------- */
+const weapon = () => ITEM[S.equip.weapon] || null;
+const armor = () => ITEM[S.equip.armor] || null;
+function holdProd(key) { let m = 1; for (const id of Object.keys(S.inv)) { const h = ITEM[id] && ITEM[id].hold; if (h && h[key] != null) m *= h[key]; } return m; }
+function holdMax(key) { let m = 0; for (const id of Object.keys(S.inv)) { const h = ITEM[id] && ITEM[id].hold; if (h && h[key] != null) m = Math.max(m, h[key]); } return m; }
+const totalMaxHp = () => S.player.maxHp + ((armor() && armor().hp) || 0);
+const totalAtk = () => Math.max(1, S.player.baseAtk + ((weapon() && weapon().atk) || 0) + ((armor() && armor().atkMod) || 0));
+const totalDef = () => S.player.baseDef + ((armor() && armor().def) || 0);
+const nextExp = l => Math.floor(30 + l * 20 + l * l * 5);
+function statsWith(wid, aid) {
+  const w = ITEM[wid] || null, a = ITEM[aid] || null;
+  return { atk: S.player.baseAtk + ((w && w.atk) || 0) + ((a && a.atkMod) || 0), def: S.player.baseDef + ((a && a.def) || 0), hp: S.player.maxHp + ((a && a.hp) || 0) };
+}
+function equipCompare(id) {
+  const it = ITEM[id]; const cur = statsWith(S.equip.weapon, S.equip.armor);
+  const nw = it.type === 'weapon' ? id : S.equip.weapon, na = it.type === 'armor' ? id : S.equip.armor;
+  return { cur, next: statsWith(nw, na) };
+}
+
+/* ---------- 所持品 ---------- */
+const owned = id => S.inv[id] || 0;
+function discoverItem(id) {
+  if (S.disc.items[id]) return;
+  S.disc.items[id] = 1;
+  const it = ITEM[id]; if (!it) return;
+  if (['epic', 'legendary', 'cursed', 'mystery'].includes(it.rar)) { toast(`✨ ${it.rar === 'legendary' ? '伝説の' : ''}${it.name} を入手！`, 'rare'); if (typeof sfx === 'function') sfx('rare'); if (typeof flashFx === 'function') flashFx('rare'); }
+}
+function giveItem(id, n, opts) {
+  n = n || 1; const it = ITEM[id]; if (!it) return false;
+  if (isEquip(it) && owned(id) > 0) { const g = Math.floor(it.price * 0.3); addGold(g); log(`すでに持っている${it.name}は売却され、${g}Gになった。`); return 'converted'; }
+  S.inv[id] = owned(id) + n; discoverItem(id);
+  return true;
+}
+function removeItem(id, n) {
+  n = n || 1; if (owned(id) < n) return false;
+  S.inv[id] -= n;
+  if (S.inv[id] <= 0) {
+    delete S.inv[id];
+    for (const slot of ['weapon', 'armor']) if (S.equip[slot] === id) {
+      S.equip[slot] = null;
+      if (slot === 'weapon' && S.inv['wooden-stick']) S.equip.weapon = 'wooden-stick';
+    }
+    S.player.hp = Math.min(S.player.hp, totalMaxHp());
+  }
+  return true;
+}
+function addGold(n) { n = Math.floor(n); S.player.gold = Math.max(0, S.player.gold + n); S.stats.maxGold = Math.max(S.stats.maxGold, S.player.gold); return n; }
+function loseGold(n) { const a = Math.min(Math.max(0, Math.floor(n)), S.player.gold); S.player.gold -= a; return a; }
+function healPlayer(n) {
+  const before = S.player.hp; S.player.hp = Math.min(totalMaxHp(), S.player.hp + Math.floor(n));
+  const d = S.player.hp - before; if (d > 0 && B && !B.over && typeof floatText === 'function') floatText($('#b-player'), '+' + d, 'heal');
+  return d;
+}
+function hurtPlayer(n) {
+  n = Math.max(0, Math.floor(n)); const inB = B && !B.over;
+  S.player.hp = Math.max(inB ? 0 : 1, S.player.hp - n);
+  if (n > 0 && inB && typeof floatText === 'function') floatText($('#b-player'), '-' + n, 'dmg');
+  return n;
+}
+
+/* ---------- 状態異常 ---------- */
+const ST = {
+  poison: { n: '毒', ic: '☠️', bad: true }, confuse: { n: '混乱', ic: '💫', bad: true }, para: { n: '麻痺', ic: '⚡', bad: true },
+  atkUp: { n: '攻撃↑', ic: '🔺' }, atkDown: { n: '攻撃↓', ic: '🔻', bad: true }, defUp: { n: '防御↑', ic: '🛡️' }, defDown: { n: '防御↓', ic: '💔', bad: true }
+};
+const OPP = { atkUp: 'atkDown', atkDown: 'atkUp', defUp: 'defDown', defDown: 'defUp' };
+function setStatus(t, s, n) {
+  if (!t.status) t.status = {};
+  const opp = OPP[s];
+  if (opp && t.status[opp]) { delete t.status[opp]; return 'cancel'; }
+  const add = (B && !B.over && B.inRound) ? 1 : 0;
+  t.status[s] = Math.max(t.status[s] || 0, n + add);
+  return 'set';
+}
+function playerStatusChance(s, c) { const a = armor(); return c * (1 - ((a && a.res && a.res[s]) || 0)); }
+function enemyStatusChance(s, c) { return (B && B.enemy.boss && (s === 'para' || s === 'confuse')) ? c * 0.5 : c; }
+function cureStatus(which) {
+  const bad = ['poison', 'confuse', 'para', 'atkDown', 'defDown']; let n = 0;
+  for (const s of (which === 'all' ? bad : [which])) if (S.player.status[s]) { delete S.player.status[s]; n++; }
+  return n;
+}
+function statusChips(t) {
+  const f = document.createDocumentFragment();
+  for (const [k, v] of Object.entries(t.status || {})) { if (v <= 0 || !ST[k]) continue; const c = el('span', 'chip ' + (ST[k].bad ? 'bad' : 'good'), `${ST[k].ic}${ST[k].n} ${v}`); f.appendChild(c); }
+  return f;
+}
+
+/* ---------- 効果適用（データ駆動） ---------- */
+const report = (t, c) => { if (B && !B.over) blog(t, c); else { log(t); if (typeof toast === 'function') toast(t); } };
+const FNS = {
+  hint() { report('📘 ' + pick(HINTS)); },
+  vmComplain() { addMod({ id: 'complaint', name: '文句割引', mult: 0.9, turns: 3 }); say('……はいはい、10%引けばいいんでしょう。引けば。'); report('自販機が文句を言いながら、全商品を10%値引きした（3アクション）。'); },
+  contract() { S.contract = 3; report('📄 契約成立。次の3戦は経験値1.5倍、ゴールド半分。返品不可。'); },
+  maybeLegend() {
+    const r = Math.random();
+    if (r < 0.1) { giveItem('legend-water'); report('箱の中から「伝説の水」が出てきた！'); }
+    else if (r < 0.45) { healPlayer(totalMaxHp() * 0.5); report('なんだか力が湧いてきた！ HPが回復した。'); }
+    else { addGold(10); report('やっぱり伝説じゃなかった。慰めに10Gが入っていた。'); }
+  },
+  purpleJuice() {
+    const r = rnd(1, 6);
+    if (r === 1) { healPlayer(80); report('甘い！ HPが80回復した。'); }
+    else if (r === 2) { setStatus(S.player, 'atkUp', 4); setStatus(S.player, 'confuse', 2); report('力が湧くが頭がぐるぐるする…'); }
+    else if (r === 3) { healPlayer(30); setStatus(S.player, 'poison', 3); report('回復したが、毒も受けた。'); }
+    else if (r === 4) { addGold(30); report('缶の底に30G入っていた。'); }
+    else if (r === 5) { setStatus(S.player, 'defUp', 4); report('肌が少し硬くなった気がする。'); }
+    else { report('ただのぶどうジュースだった。'); }
+  },
+  bonusEnding() {
+    if (!gagAll()) { const n = GAG_IDS.filter(i => S.disc.items[i]).length; report(`📗 まだ読めない文字がある… （ネタ商品 ${n}/${GAG_IDS.length}）`); return; }
+    if (S.flags['end:bonus']) { report('📗 もう読み終えた。それはそれは、立派な取扱説明書だった。'); return; }
+    S.flags['end:bonus'] = true; showEnding('bonus');
+  }
+};
+function effectDmgBase(e) { return e.v; }
+function applyEffects(effs, item, ctx) {
+  for (const e of effs) {
+    switch (e.t) {
+      case 'heal': { const d = healPlayer(e.v); report(`HPが${d}回復した。`, 'heal'); break; }
+      case 'healPct': { const d = healPlayer(totalMaxHp() * e.v / 100); report(`HPが${d}回復した。`, 'heal'); break; }
+      case 'healRand': { const d = healPlayer(rnd(e.min, e.max)); report(`HPが${d}回復した。`, 'heal'); break; }
+      case 'cure': { const n = cureStatus(e.s); if (n) report('状態異常が治った。'); break; }
+      case 'st': {
+        if (e.to === 'self') { const r = setStatus(S.player, e.s, e.n); report(r === 'cancel' ? `${ST[e.s].n}が打ち消された。` : `${ST[e.s].ic}${ST[e.s].n}（${e.n}ターン）`); }
+        else if (B && !B.over) { if (chance(enemyStatusChance(e.s, e.c)) ) { const r = setStatus(B.enemy, e.s, e.n); blog(`${B.enemy.name}に${ST[e.s].ic}${ST[e.s].n}！`); } else blog(`${B.enemy.name}には効かなかった。`); }
+        break; }
+      case 'tagSt': {
+        if (B && !B.over && B.enemy.tags.includes(e.tag)) { setStatus(B.enemy, e.s, e.n); blog(`${B.enemy.name}に${ST[e.s].ic}${ST[e.s].n}！`); }
+        else if (!e.silent) report(e.fail || '何も起きなかった。');
+        break; }
+      case 'tagSkip': { if (B && !B.over && B.enemy.tags.includes(e.tag)) { B.enemySkip = (B.enemySkip || 0) + 1; blog(`${B.enemy.name}は仲間だと思って攻撃をためらった！`); } break; }
+      case 'dmg': {
+        if (!(B && !B.over)) { report('敵がいないので、効果がなかった。'); break; }
+        let base = e.v;
+        if (e.tag) { const match = B.enemy.tags.includes(e.tag); if (!match && e.only) break; if (match) base = e.v * (e.m || 1); }
+        const em = elemMult(B.enemy, e.el);
+        const d = Math.max(1, Math.floor(base * em * rand(0.9, 1.1)));
+        damageEnemy(d, { item: true });
+        blog(`${item ? item.name : '効果'}！ ${B.enemy.name}に${d}ダメージ${em > 1 ? '（弱点！）' : em < 1 ? '（耐性）' : ''}。`, 'good');
+        break; }
+      case 'gold': { addGold(e.v); report(`${e.v}Gを手に入れた。`); break; }
+      case 'goldRand': { const g = rnd(e.min, e.max); addGold(g); report(`財布から${g}Gが出てきた！`); break; }
+      case 'exp': { gainExperience(e.v); report(`経験値を${e.v}獲得！`); break; }
+      case 'msg': report(e.text); break;
+      case 'flag': S.flags[e.k] = true; break;
+      case 'story': discoverStory(e.id); break;
+      case 'nextCrit': if (B && !B.over) { B.nextCrit = true; blog('次の攻撃が会心になる！'); } break;
+      case 'fleeUp': if (B && !B.over) { B.fleeBonus += e.v; blog('逃走しやすくなった。'); } break;
+      case 'reflect': if (B && !B.over) { B.reflect = true; blog('鏡が輝く。次の攻撃を反射する！'); } break;
+      case 'reveal': if (B && !B.over) { B.reveal = true; blog('レシートに敵の行動が書かれている…！'); } break;
+      case 'rewind': if (B && !B.over) { const to = Math.min(totalMaxHp(), Math.max(S.player.hp, B.prevHp)); const d = to - S.player.hp; S.player.hp = to; blog(`時が戻った。HPが${d}回復した。`, 'heal'); } break;
+      case 'perm': {
+        const used = S.permUsed[item.id] || 0;
+        if (used >= e.max) { report('これ以上は効果がないようだ。'); break; }
+        S.permUsed[item.id] = used + 1;
+        if (e.stat === 'maxHp') { S.player.maxHp += e.v; S.player.hp += e.v; } else S.player[e.stat] += e.v;
+        report(`${e.stat === 'maxHp' ? '最大HP' : '攻撃力'}が永続的に+${e.v}！（${used + 1}/${e.max}）`, 'good'); break; }
+      case 'gacha': {
+        const tbl = e.tier === 'lucky' ? [['hi-potion', 30], ['dragon-jerky', 20], ['thunder-scroll', 20], ['hero-sports', 15], ['mirror-shard', 10], ['elixir', 4], ['fate-coin', 1]] : [['small-potion', 25], ['potion', 20], ['water', 15], ['energy', 10], ['onigiri', 10], ['smoke-ball', 8], ['fire-scroll', 6], ['nothing-stone', 6]];
+        const r = wpick(tbl, x => x[1]); giveItem(r[0]); report(`ガチャ結果：${ITEM[r[0]].name}！`); break; }
+      case 'maybe': applyEffects(chance(e.c) ? e.ok : e.fail, item, ctx); break;
+      case 'fn': FNS[e.name](); break;
+    }
+  }
+}
+function itemUsable(it, inB) {
+  if (!it || it.type === 'weapon' || it.type === 'armor' || it.type === 'key') return false;
+  return inB ? it.battle !== false : it.field !== false;
+}
+function isUseless(it) {
+  if (!it.effects.length || !it.effects.every(e => ['heal', 'healPct', 'healRand', 'cure'].includes(e.t))) return false;
+  const bad = ['poison', 'confuse', 'para', 'atkDown', 'defDown'].some(s => S.player.status[s]);
+  return S.player.hp >= totalMaxHp() && !bad;
+}
+function useItem(id, ctx) {
+  const inB = !!(ctx && ctx.battle); const it = ITEM[id];
+  if (!it || owned(id) < 1) return false;
+  if (!itemUsable(it, inB)) { toast(inB ? 'この商品は戦闘中に使えない。' : 'この商品は戦闘中のみ使える。'); return false; }
+  if (inB && B.sealTurns > 0) { blog('アイテムは封印されていて使えない！', 'bad'); return false; }
+  if (isUseless(it)) { toast('今は使っても効果がない（HPは満タン）。'); return false; }
+  if (inB) blog(`${S.player.name}は${it.name}を使った！`); else log(`${it.name}を使った。`);
+  if (typeof sfx === 'function') sfx('item');
+  if (it.type === 'consumable' || it.consumeOnUse) removeItem(id, 1);
+  if (it.expired) S.stats.expiredUsed++;
+  if (!it.effects.length) report('……何も起きなかった。');
+  applyEffects(it.effects, it, ctx);
+  if (inB && B.enemy.weakItems && B.enemy.weakItems.includes(id)) { setStatus(B.enemy, 'defDown', 4); blog(`${B.enemy.name}はこの商品が苦手なようだ！ 防御が下がった。`, 'good'); }
+  if (!inB) say(pick(['そのアイテムを使う人、初めて見ました。', 'ご利用ありがとうございます。', 'お味はいかがですか。']));
+  checkAchievements(); refresh();
+  return true;
+}
+function equipItem(id) {
+  if (B && !B.over) { toast('戦闘中は装備を変更できない。'); return false; }
+  const it = ITEM[id]; if (!it || owned(id) < 1 || !isEquip(it)) return false;
+  S.equip[it.type] = id; S.player.hp = Math.min(S.player.hp, totalMaxHp());
+  log(`${it.name}を装備した。`); discoverItem(id);
+  if (typeof sfx === 'function') sfx('equip');
+  if (id === 'legendary-leek') say(pick(LINES.weaponLeek)); else if (id === 'talking-sword') say(pick(LINES.weaponTalking)); else if (id === 'wrench') say(pick(LINES.weaponWrench)); else if (id === 'maou-fork') say(pick(LINES.weaponFork));
+  checkAchievements(); refresh(); return true;
+}
+function unequip(slot) {
+  if (B && !B.over) { toast('戦闘中は装備を変更できない。'); return; }
+  if (!S.equip[slot]) return;
+  S.equip[slot] = null; S.player.hp = Math.min(S.player.hp, totalMaxHp()); refresh();
+}
+
+/* ---------- 収集率など ---------- */
+const gagAll = () => GAG_IDS.every(i => S.disc.items[i]);
+const makerCount = () => MAKER_IDS.filter(i => S.disc.items[i]).length;
+function dexRate(kind) {
+  let have = 0, total = 0;
+  if (kind === 'item') { const l = ITEMS.filter(i => !isEquip(i)); total = l.length; have = l.filter(i => S.disc.items[i.id]).length; }
+  else if (kind === 'weapon') { const l = ITEMS.filter(i => i.type === 'weapon'); total = l.length; have = l.filter(i => S.disc.items[i.id]).length; }
+  else if (kind === 'armor') { const l = ITEMS.filter(i => i.type === 'armor'); total = l.length; have = l.filter(i => S.disc.items[i.id]).length; }
+  else if (kind === 'enemy') { total = ENEMIES.length; have = ENEMIES.filter(e => S.disc.enemies[e.id]).length; }
+  else if (kind === 'event') { total = VEV.length + BEV.length; have = VEV.filter(e => S.disc.events[e.id]).length + BEV.filter(e => S.disc.events['b:' + e.id]).length; }
+  else if (kind === 'story') { total = STORIES.length; have = STORIES.filter(s => S.disc.story[s.id]).length; }
+  return { have, total, rate: total ? have / total : 0 };
+}
+function countEvents(kinds) { return VEV.filter(e => kinds.includes(e.kind) && S.disc.events[e.id]).length; }
+function discoverStory(id) {
+  if (!STORY[id] || S.disc.story[id]) return;
+  S.disc.story[id] = 1; toast(`📖 ストーリー記録「${STORY[id].t}」を発見`, 'story'); log(`📖 記録を発見：${STORY[id].t}`, 'story');
+  if (typeof sfx === 'function') sfx('secret');
+  const n = STORIES.filter(s => S.disc.story[s.id]).length;
+  if (n >= 18 && !S.disc.story.backside) discoverStory('backside');
+}
+
+/* ---------- 実績 ---------- */
+let achBusy = false;
+function checkAchievements() {
+  if (achBusy) return; achBusy = true;
+  try {
+    let changed = true, guard = 0;
+    while (changed && guard++ < 10) {
+      changed = false;
+      for (const a of ACHS) {
+        if (S.ach[a.id]) continue;
+        let ok = false; try { ok = !!a.cond(); } catch (e) { ok = false; }
+        if (ok) {
+          S.ach[a.id] = Date.now(); changed = true;
+          toast(`🏆 実績解除：${a.name}`, 'ach'); log(`🏆 実績解除：${a.name}`, 'ach');
+          if (typeof sfx === 'function') sfx('ach');
+          if (a.reward.gold) addGold(a.reward.gold);
+          if (a.reward.exp) gainExperience(a.reward.exp);
+        }
+      }
+    }
+  } finally { achBusy = false; }
+}
+
+/* ---------- 経験値・レベルアップ ---------- */
+let lvGain = null;
+function gainExperience(n) {
+  n = Math.floor(n); if (!(n > 0)) return;
+  const p = S.player;
+  if (p.level >= MAX_LV) { const g = Math.floor(n * 0.5); addGold(g); log(`レベル上限のため、経験値${n}が${g}Gに換算された。`); return; }
+  p.exp += n;
+  while (p.level < MAX_LV && p.exp >= nextExp(p.level)) { p.exp -= nextExp(p.level); levelUp(); }
+  if (p.level >= MAX_LV) { p.exp = 0; }
+  if (lvGain) flushLevelUp();
+}
+function levelUp() {
+  const p = S.player; const before = p.level;
+  if (!lvGain) lvGain = { from: before, hp: 0, atk: 0, def: 0 };
+  p.level++;
+  const dAtk = p.level % 2 === 0 ? 3 : 2, dDef = p.level % 3 === 0 ? 2 : 1;
+  p.maxHp += HP_PER_LV; p.baseAtk += dAtk; p.baseDef += dDef;
+  lvGain.hp += HP_PER_LV; lvGain.atk += dAtk; lvGain.def += dDef; lvGain.to = p.level;
+  p.hp = Math.min(totalMaxHp(), p.hp + HP_PER_LV + Math.floor(totalMaxHp() * 0.3));
+}
+function flushLevelUp() {
+  const g = lvGain; lvGain = null; if (!g) return;
+  const t = `Lv${g.from} → Lv${g.to}　HP+${g.hp} 攻撃+${g.atk} 防御+${g.def}`;
+  log(`⭐ レベルアップ！ ${t}`, 'lv'); showBanner('LEVEL UP!', t, 'lv');
+  if (typeof sfx === 'function') sfx('levelup');
+  if (B && B.result) B.result.levelups.push(t);
+  say(pick(LINES.levelup));
+  checkUnlocks();
+}
+
+/* =====================================================================
+   p4: 自販機ロジック（価格・在庫・購入・イベント・コマンド）
+   ===================================================================== */
+const EL = { fire: '火', ice: '氷', thunder: '雷', holy: '聖', dark: '闇' };
+let buyLock = false, evBusy = false, uiLocked = false;
+
+/* ---------- 解放条件 ---------- */
+function condOk(c) {
+  if (!c) return true; const p = S.player;
+  if (c.lv && p.level < c.lv) return false;
+  if (c.p && S.stats.purchases < c.p) return false;
+  if (c.wins && S.stats.wins < c.wins) return false;
+  if (c.def && !(S.defeated[c.def] > 0)) return false;
+  if (c.flag && !S.flags[c.flag]) return false;
+  if (c.gagAll && !gagAll()) return false;
+  if (c.has && !(S.inv[c.has] > 0)) return false;
+  if (c.maker && makerCount() < c.maker) return false;
+  return true;
+}
+function condText(c) {
+  if (!c) return ''; const a = [];
+  if (c.lv) a.push(`Lv${c.lv}以上`); if (c.p) a.push(`購入${c.p}回以上`); if (c.wins) a.push(`${c.wins}勝以上`);
+  if (c.def) a.push(`${(ENEMY[c.def] || {}).name || '？'}撃破`); if (c.flag) a.push('特定の条件');
+  if (c.gagAll) a.push('ネタ商品を全て発見'); if (c.has) a.push(`${(ITEM[c.has] || {}).name || '？'}を所持`); if (c.maker) a.push(`製作者関連${c.maker}種`);
+  return a.join('・') + 'で解放';
+}
+const itemUnlocked = it => condOk(it.un) && (!it.flagUnlock || !!S.flags[it.flagUnlock]);
+const itemVisible = it => !it.noShop && (!it.hidden || itemUnlocked(it));
+
+/* ---------- 価格・割引 ---------- */
+const activeMods = () => S.mods.filter(m => m.until > S.clock);
+function addMod(m) { S.mods = S.mods.filter(x => x.id !== m.id); S.mods.push({ id: m.id, name: m.name, mult: m.mult, cat: m.cat || null, ids: m.ids || null, until: S.clock + (m.turns || 5) }); }
+function modApplies(m, it) { if (m.ids) return m.ids.includes(it.id); if (m.cat) return it.cat === m.cat; return true; }
+function getPrice(it) {
+  let m = 1;
+  for (const md of activeMods()) if (modApplies(md, it)) m *= md.mult;
+  if (S.flags.regular) m *= 0.97;
+  m *= 1 - Math.min(0.1, Math.floor(S.stats.purchases / 15) * 0.01);
+  if (it.cat === 'gag') m *= 1 - holdMax('gagDiscount');
+  return Math.max(1, Math.round(it.price * m));
+}
+const isBlocked = id => { const b = S.blocked[id]; return b && b.until > S.clock; };
+const stockLeft = it => it.stock == null ? Infinity : (S.stock[it.id] === undefined ? it.stock : S.stock[it.id]);
+function dispName(it) {
+  const ns = S.nameSwap;
+  if (ns && ns.until > S.clock) { if (it.id === ns.a) return (ITEM[ns.b] || it).name; if (it.id === ns.b) return (ITEM[ns.a] || it).name; }
+  return it.name;
+}
+function dispDesc(it) {
+  const o = S.descOverride[it.id]; if (o && o.until > S.clock) return o.text;
+  const n = S.buyCount[it.id] || 0;
+  if (n >= 3 && !isEquip(it)) return `「${it.desc}」……という説明を、あなたはもう${n}回読んでいる。`;
+  return it.desc;
+}
+function effText(e) {
+  switch (e.t) {
+    case 'heal': return `HP+${e.v}`; case 'healPct': return e.v >= 100 ? 'HP全回復' : `HP+${e.v}%`; case 'healRand': return `HP+${e.min}〜${e.max}`;
+    case 'cure': return e.s === 'all' ? '状態異常を治す' : `${ST[e.s].n}を治す`;
+    case 'st': return e.to === 'self' ? `${ST[e.s].n}(${e.n}T)` : `敵に${ST[e.s].n}${e.c < 1 ? `(${Math.round(e.c * 100)}%)` : ''}`;
+    case 'tagSt': return e.silent ? '' : `特定の敵に${ST[e.s].n}`;
+    case 'dmg': return `敵に${e.v}ダメージ${e.el ? `(${EL[e.el]})` : ''}${e.tag ? '(特効あり)' : ''}`;
+    case 'gold': return `+${e.v}G`; case 'goldRand': return `${e.min}〜${e.max}G入手`; case 'exp': return `経験値+${e.v}`;
+    case 'nextCrit': return '次の攻撃が会心'; case 'fleeUp': return '逃走率UP'; case 'reflect': return '攻撃を反射';
+    case 'reveal': return '敵の行動が見える'; case 'rewind': return 'HPを巻き戻す'; case 'perm': return `永続強化(${e.max}回まで)`;
+    case 'gacha': return 'ガチャ'; case 'maybe': return '確率で追加効果'; case 'tagSkip': return 'スライム系が攻撃をためらう'; case 'fn': return '不思議な効果';
+    default: return '';
+  }
+}
+function effectText(it) {
+  if (it.type === 'weapon') return `攻撃力+${it.atk}${it.sp ? ' / ' + it.sp : ''}`;
+  if (it.type === 'armor') return `防御力+${it.def}${it.hp ? ` HP+${it.hp}` : ''}${it.atkMod ? ` 攻撃${it.atkMod}` : ''}${it.sp ? ' / ' + it.sp : ''}`;
+  if (it.type === 'key') return '大切なもの（使用不可）';
+  const t = it.effects.map(effText).filter(Boolean).join(' / ');
+  const hold = it.hold ? '所持中：' + (it.hold.goldMult ? 'ゴールド+20% 被ダメ+10%' : it.hold.gagDiscount ? 'ネタ商品半額' : '') : '';
+  return [t, hold].filter(Boolean).join(' ｜ ') || '効果なし（？）';
+}
+function useWhere(it) { if (isEquip(it)) return '装備'; if (it.type === 'key') return '—'; return it.battle !== false && it.field !== false ? '戦闘中/通常' : it.battle !== false ? '戦闘中のみ' : '通常のみ'; }
+
+/* ---------- 時間（アクション）経過 ---------- */
+function tick(n) {
+  S.clock += (n || 1);
+  const ended = S.mods.filter(m => m.until <= S.clock);
+  for (const m of ended) log(`🏷️ 「${m.name}」が終了した。`);
+  S.mods = S.mods.filter(m => m.until > S.clock);
+  for (const k of Object.keys(S.blocked)) if (S.blocked[k].until <= S.clock) delete S.blocked[k];
+  if (S.nameSwap && S.nameSwap.until <= S.clock) S.nameSwap = null;
+  for (const k of Object.keys(S.descOverride)) if (S.descOverride[k].until <= S.clock) delete S.descOverride[k];
+  if (S.quota && S.clock > S.quota.until) { S.quota = null; log('📋 販売ノルマは達成できなかった。'); say('ノルマ未達です。あとで始末書を書いてください。'); }
+  if (S.stats.battles - S.restockAt >= 8) restock();
+}
+function restock() {
+  S.restockAt = S.stats.battles; let n = 0;
+  for (const it of ITEMS) if (it.stock != null && !it.unique && S.stock[it.id] !== undefined && S.stock[it.id] < it.stock) { S.stock[it.id] = it.stock; n++; }
+  if (n) { log('📦 自販機が再入荷した。'); toast('📦 在庫が補充された'); }
+}
+
+/* ---------- 解放チェック ---------- */
+function seedAnnounced() { for (const it of ITEMS) if (itemVisible(it) && itemUnlocked(it)) S.announced[it.id] = true; }
+function checkUnlocks() {
+  for (const it of ITEMS) {
+    if (!itemVisible(it) || !itemUnlocked(it) || S.announced[it.id]) continue;
+    S.announced[it.id] = true;
+    toast(`🆕 新商品入荷：${it.name}`, 'new'); log(`🆕 新商品入荷：${it.name}`);
+    if (it.hidden && typeof sfx === 'function') sfx('secret');
+  }
+}
+
+/* ---------- セリフ ---------- */
+function say(text) {
+  S.vmText = text;
+  const b = $('#vm-bubble'); if (b) { b.textContent = text; b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop'); }
+}
+function vmLine(ctx) {
+  let pool = (LINES[ctx] || LINES.idle).slice();
+  if (ctx === 'visit') { pool = LINES.welcome.concat(LINES.idle); if (S.player.gold < 60) pool = LINES.broke.concat(pool); if (S.player.gold > 2000) pool = LINES.rich.concat(pool); if (S.player.level >= 25) pool = LINES.late.concat(pool); if (makerCount() > 0) pool = pool.concat(LINES.makerTalk); }
+  const fresh = pool.filter(l => !S.recentLines.includes(l));
+  const l = pick(fresh.length ? fresh : pool);
+  S.recentLines.push(l); if (S.recentLines.length > 8) S.recentLines.shift();
+  return l;
+}
+
+/* ---------- 購入 ---------- */
+function buyFail(msgText, cls) { toast(msgText, 'bad'); if (typeof sfx === 'function') sfx('fail'); return false; }
+function buyItem(id, opts) {
+  opts = opts || {};
+  if (buyLock || uiLocked) return false;
+  if (B && !B.over) return buyFail('戦闘中は自販機に近づけない！');
+  const it = ITEM[id]; if (!it) return false;                                  // 1. 商品ID
+  if (!opts.special) {
+    if (!itemVisible(it) || !itemUnlocked(it)) return buyFail('この商品はまだ購入できない。');   // 2. 条件
+    if (isBlocked(id)) return buyFail('この商品は現在購入できない。');
+    if (stockLeft(it) <= 0) return buyFail('売り切れ（SOLD OUT）です。');             // 3. 在庫
+    if (isEquip(it) && owned(id) > 0) return buyFail('すでに所持している。');
+  }
+  const price = opts.price != null ? opts.price : getPrice(it);                // 5. 価格確定
+  if (S.player.gold < price) { say(vmLine('broke')); return buyFail(`ゴールドが足りない（あと${price - S.player.gold}G）`); }   // 4. 所持金
+  buyLock = true;
+  try {
+    if (S.rebel && !opts.special) {
+      S.rebel = false; say('……嫌です。今日はその商品は売りたくない気分です。もう一度押してください。'); log('🙅 自販機の反抗：購入は拒否された（ゴールドは減っていない）。', 'ev');
+      if (typeof sfx === 'function') sfx('fail'); refresh(); return false;
+    }
+    S.player.gold -= price;                                                    // 6. ゴールド
+    S.stats.spent += price; S.stats.bigSpend = Math.max(S.stats.bigSpend, price);
+    if (!opts.special && it.stock != null) S.stock[id] = stockLeft(it) - 1;
+    giveItem(id, 1);                                                           // 7. 所持品
+    if (S.atari && !opts.special) { S.atari = false; if (!isEquip(it) && it.type !== 'key') { giveItem(id, 1); log('🎯 当たり！ もう1個おまけ！', 'ev'); toast('🎯 当たり！ おまけ付き'); } else { addGold(Math.floor(price * 0.3)); log('🎯 当たり！ キャッシュバック。', 'ev'); } }
+    S.stats.purchases++; S.stats.buyStreak++; S.stats.noBuyVisits = 0; S.stats.winsNoBuy = 0;   // 8. 購入回数
+    S.buyCount[id] = (S.buyCount[id] || 0) + 1; S.lastBuyId = id; S.buyOrder.push(id); if (S.buyOrder.length > 6) S.buyOrder.shift();
+    log(`🛒 ${it.name}を${price}Gで購入。`, 'buy');                                 // 9. ログ
+    say(it.cat === 'gag' ? '……ネタ商品をお買い上げ。気が合いますね。' : vmLine('buy'));
+    if (typeof sfx === 'function') sfx(['epic', 'legendary', 'cursed', 'mystery'].includes(it.rar) ? 'rare' : 'buy');
+    if (typeof vendFx === 'function') vendFx(it);
+    if (S.quota) { S.quota.done++; if (S.quota.done >= S.quota.need) { addGold(S.quota.reward); log(`📋 ノルマ達成！ ${S.quota.reward}G獲得。`, 'ev'); toast(`📋 ノルマ達成！ +${S.quota.reward}G`); S.quota = null; } }
+    tick(1);
+  } finally { setTimeout(() => { buyLock = false; }, 200); }
+  // 10. 関連イベント・実績
+  if (it.id === 'cursed-soda') triggerEvent('blackout');
+  else if (it.cat === 'gag' && chance(0.5)) triggerEvent('gag-joy');
+  else if (!opts.special && S.stats.buyStreak >= 3 && S.stats.buyStreak % 3 === 0) triggerEvent('combo');
+  else rollVendingEvent('buy');
+  checkAutoEvents(); checkUnlocks(); checkAchievements();
+  refresh();                                                                   // 11. 再描画
+  return true;
+}
+function visitVending() {
+  S.stats.noBuyVisits++;
+  say(vmLine('visit'));
+  checkAutoEvents(); checkUnlocks(); checkAchievements();
+  rollVendingEvent('visit');
+}
+
+/* ---------- 休憩・コマンド ---------- */
+const restCost = () => 10 + S.player.level * 2;
+function restAtBench() {
+  if (B && !B.over) return;
+  const cost = restCost();
+  if (S.player.hp >= totalMaxHp()) return toast('HPは満タンだ。');
+  if (S.player.gold < cost) return buyFail(`ベンチの利用料が足りない（${cost}G）`);
+  S.player.gold -= cost; const d = healPlayer(Math.max(20, totalMaxHp() * 0.4));
+  S.player.status = {}; log(`🪑 ベンチで休憩（${cost}G）。HPが${d}回復した。`); say('ベンチ利用料です。座り心地は保証しません。');
+  if (typeof sfx === 'function') sfx('heal'); tick(1); refresh();
+}
+const normCmd = t => (t || '').normalize('NFKC').trim().toLowerCase().replace(/\s+/g, '');
+function runCommand(raw) {
+  const c = normCmd(raw);
+  if (!c) return 'コードを入力してください。';
+  if (c === 'maougakita') {
+    if (!S.flags.couponCode) { say('そのコードは、まだ届いていませんが？'); return '無効なコードです。'; }
+    if (S.flags.couponUsed) return 'このクーポンは使用済みです。';
+    S.flags.couponUsed = true; addMod({ id: 'maoucoupon', name: '魔王クーポン', mult: 0.8, turns: 8 }); say('魔王様のクーポンですね。……チッ。全商品20%引きです。'); log('🎫 魔王クーポン：全商品20%OFF（8アクション）。', 'ev'); refresh(); return 'クーポン適用！ 全商品20%OFF。';
+  }
+  if (['debug', 'ばぐ', 'bug', 'バグ'].includes(c)) {
+    if (S.player.level < 10) { say('まだ早いです。もう少し強くなってからにしてください。'); return 'Lv10以上で有効になるようだ…。'; }
+    if (S.flags.debugCmd) return 'すでに実行済みだ。';
+    S.flags.debugCmd = true; triggerEvent('debug-cmd'); return 'DEBUG MODE: ■■■';
+  }
+  if (c === 'uuddlrlrba') { konamiCommand(); return '……！'; }
+  if (c === 'maker' || c === '製作者') { S.flags.makerMet = true; say(pick(['製作者は今、締切と戦っています。', '製作者にクレームは受け付けていません。'])); checkAchievements(); return '製作者はここにはいない。たぶん。'; }
+  if (c === 'ひらけごま') { say('異世界の扉は開きませんでした。ここは自販機です。'); return '何も起きなかった。'; }
+  if (c === '自販機' || c === 'vm') { say('呼びましたか？ ご注文は？'); return '自販機が返事をした。'; }
+  say('そのコードは存在しません。メンテナンス中ではありません。'); return '不明なコードです。';
+}
+function konamiCommand() {
+  if (S.flags.konami) { toast('あの呪文はもう唱えた。'); return; }
+  S.flags.konami = true; triggerEvent('konami');
+}
+let pokeTimes = [];
+function pokeMachine() {
+  S.stats.vmClicks++; const now = Date.now(); pokeTimes.push(now); pokeTimes = pokeTimes.filter(t => now - t < 4000);
+  if (typeof sfx === 'function') sfx('poke');
+  const vm = $('#vm'); if (vm) { vm.classList.remove('shake'); void vm.offsetWidth; vm.classList.add('shake'); }
+  if (pokeTimes.length >= 10 && !S.flags.pokeBurst) { S.flags.pokeBurst = true; triggerEvent('poke-secret'); }
+  else if (chance(0.3)) say(vmLine('poke'));
+  checkAchievements(); renderHUD();
+}
+
+/* ---------- 自販機イベント定義 ---------- */
+const VEV = [];
+function V(id, name, kind, o) { VEV.push(Object.assign({ id, name, kind, w: 10, cd: 10, once: false, cond: null, auto: false, manual: false, run: async () => {} }, o)); }
+const VEVM = {};
+function evMsg(text) { log('🎪 ' + text, 'ev'); showEventBanner(text); }
+const visibleItems = () => ITEMS.filter(i => itemVisible(i) && itemUnlocked(i));
+function randItems(n, f) { const l = visibleItems().filter(f || (() => true)).sort(() => Math.random() - 0.5); return l.slice(0, n); }
+
+/* ---- 通常 ---- */
+V('timesale', 'タイムセール', 'normal', { w: 14, run() { const cat = pick(['potion', 'drink', 'food', 'magic']); addMod({ id: 'timesale', name: `${CAT_NAME[cat]}タイムセール`, mult: 0.7, cat, turns: 6 }); evMsg(`タイムセール開始！ ${CAT_NAME[cat]}が30%OFF（6アクション）。`); say('今だけです。今だけですからね。明日は知りません。'); } });
+V('new-item', '謎の新商品', 'normal', { once: true, cond: () => S.stats.purchases >= 3, run() { S.flags.newItem = true; evMsg('商品一覧に、見たことのない商品が追加された…！'); say('その商品は私も何か知りません。'); } });
+V('escape', '商品の脱走', 'normal', { w: 8, cd: 15, run() { spawnEscapee(); } });
+V('rebel', '自販機の反抗', 'normal', { w: 7, cd: 15, cond: () => S.stats.purchases >= 4, run() { S.rebel = true; evMsg('自販機が不機嫌だ。次のボタンは押しても反応しないかもしれない。'); say('今日は気分が乗りません。'); } });
+V('change-miracle', 'お釣りの奇跡', 'normal', { run() { const g = rnd(20, 60); addGold(g); evMsg(`返却口に小銭が溜まっていた！ +${g}G`); } });
+V('change-curse', 'お釣りの呪い', 'normal', { cond: () => S.player.gold >= 60, run() { const g = loseGold(Math.min(rnd(10, 40), Math.floor(S.player.gold * 0.3))); evMsg(`お釣りが呪われていた…。${g}Gが消えた。`); } });
+V('soldout-fest', '売り切れ祭り', 'normal', { w: 7, run() { const l = randItems(rnd(3, 5), i => !i.unique); for (const i of l) S.blocked[i.id] = { until: S.clock + 5, label: 'SOLD OUT' }; evMsg('売り切れ祭り！ いくつかの商品が一時的に売り切れた（5アクション）。'); say('売り切れです。売り切れの気分です。'); } });
+V('atari', '商品の当たり', 'normal', { run() { S.atari = true; evMsg('ピロリロリン！ 次に買う商品に「当たり」がつくかもしれない。'); } });
+V('hazure', '商品のハズレ', 'normal', { w: 6, run() { giveItem('some-part'); evMsg('ガコン。取り出し口から出てきたのは「何かの部品」だった。ハズレ。'); } });
+V('nap', '自販機の居眠り', 'normal', { w: 7, cd: 12, run() { evMsg('自販機がうとうとし始めた…'); lockUI(2500, '💤 Zzz…'); } });
+V('talking-drink', 'しゃべる飲料', 'normal', { run() { const t = pick(['「俺を選べ。冷えてるぜ」', '「ぬるいのが好きな方、いませんか…」', '「ラベルを読まないでください」', '「勇者様のこと、陰ながら応援してます」']); evMsg('商品が話しかけてきた！ ' + t); } });
+V('breakdown', '自販機の故障', 'normal', { w: 6, cd: 15, run() { const l = randItems(rnd(3, 4), i => !i.unique); for (const i of l) S.blocked[i.id] = { until: S.clock + 4, label: '故障中' }; evMsg('ガガガ…自販機の一部が故障した（4アクション）。'); say('ご不便をおかけしております。直す気はありません。'); } });
+V('priceup', '急な値上げ', 'normal', { w: 7, cond: () => S.stats.purchases >= 5, run() { const cat = pick(['potion', 'drink', 'food', 'magic', 'weapon']); addMod({ id: 'priceup', name: `${CAT_NAME[cat]}値上げ`, mult: 1.3, cat, turns: 5 }); evMsg(`急な値上げ！ ${CAT_NAME[cat]}が30%アップ（5アクション）。`); say('原材料費の高騰です。異世界の。'); } });
+V('discount-rand', '謎の値引き', 'normal', { w: 9, run() { const l = randItems(3, i => i.price > 20 && !i.unique); if (!l.length) return; addMod({ id: 'randsale', name: '謎の値引き', mult: 0.6, ids: l.map(i => i.id), turns: 5 }); evMsg(`謎の値引き！ ${l.map(i => i.name).join('、')}が40%OFF（5アクション）。`); } });
+V('maou-call', '魔王の電話', 'normal', { w: 7, cd: 20, cond: () => S.stats.purchases >= 6, async run() {
+  evMsg('プルルル…自販機に魔王から着信が入った。'); S.flags.maouCall = true;
+  const i = await askChoice('📞 魔王からの電話', '魔王「あー、もしもし。今度の戦いについてなんだが…そのー、割引は…あるか？」', ['割引クーポンを渡す（全商品10%OFF 6アクション）', '電話を切る', '世間話をする（経験値+15）']);
+  if (i === 0) { addMod({ id: 'maoucall', name: '魔王の友情価格', mult: 0.9, turns: 6 }); evMsg('魔王「恩に着る」 全商品10%OFF！'); }
+  else if (i === 1) { addGold(30); evMsg('魔王「ひどい…」 魔王が泣きながら30G置いていった。'); }
+  else { gainExperience(15); evMsg('魔王と世間話をした。経験値+15。'); } } });
+V('quota', '勇者の営業', 'normal', { w: 6, cd: 20, cond: () => !S.quota && S.stats.purchases >= 3, run() { S.quota = { need: 3, done: 0, until: S.clock + 6, reward: 150 }; evMsg('自販機が勇者に販売ノルマを課した！ 6アクション以内に3個購入で150G。'); say('ノルマです。勇者様も社会人のはずです。'); } });
+V('slime-visit', 'スライム来店', 'normal', { w: 7, cd: 15, async run() {
+  evMsg('スライムが来店した！ 水を買おうとしている。');
+  const i = await askChoice('🟢 スライム来店', 'スライム「ぷる…ぷるる（水をください）」', ['水を売る（+25G）', '戦う！']);
+  if (i === 0) { addGold(25); S.disc.enemies.slime = 1; discoverStory('firstCustomer'); evMsg('スライムは満足して帰っていった。+25G'); }
+  else { if (B && !B.over) return; startBattle('slime'); } } });
+V('goblin-bulk', 'ゴブリンの買い占め', 'normal', { w: 6, run() { const l = randItems(2, i => i.price <= 100 && !i.unique); for (const i of l) S.blocked[i.id] = { until: S.clock + 6, label: '買い占め' }; evMsg(`ゴブリンが${l.map(i => i.name).join('と')}を買い占めた！（6アクション）`); } });
+V('ghost-buy', '幽霊の購入', 'normal', { w: 5, cd: 25, cond: () => S.stats.purchases >= 5, run() { giveItem('holy-water'); evMsg('幽霊が商品を購入し、お礼に「聖水」を残していった。'); } });
+V('merchant', '迷子の商人', 'normal', { w: 6, cd: 25, cond: () => S.stats.purchases >= 4, async run() {
+  evMsg('迷子の商人が通りかかった。限定商品を売ってくれるらしい。');
+  const l = randItems(3, i => !isEquip(i) && i.type !== 'key' && i.price >= 40 && i.price <= 900 && !i.hidden);
+  if (!l.length) return;
+  const offers = l.map(i => ({ id: i.id, price: Math.max(1, Math.round(i.price * 0.6)) }));
+  const k = await askChoice('🧳 迷子の商人', '商人「いやあ、道に迷ってね。持ち物を安くしておくよ。どれか1つどうだい？」', offers.map(o => `${ITEM[o.id].name}（${o.price}G）`).concat(['やめておく']));
+  if (k < offers.length) { const o = offers[k]; if (S.player.gold >= o.price) { S.player.gold -= o.price; giveItem(o.id); S.stats.purchases++; log(`🧳 商人から${ITEM[o.id].name}を${o.price}Gで購入。`, 'buy'); evMsg('商人から商品を買った！'); } else evMsg('お金が足りなかった。商人は肩をすくめて去った。'); }
+  else evMsg('商人は道を聞いて去っていった。'); } });
+/* ---- コミカル ---- */
+V('broke-taunt', '金欠を煽る', 'comic', { w: 12, cd: 12, cond: () => S.player.gold < 80 && S.stats.purchases >= 2, run() { if (S.player.gold < 30 && !S.evCd.__pity) { S.evCd.__pity = S.clock; addGold(15); evMsg('自販機「見てられません。15G、貸しにしておきます」 +15G'); } else evMsg(pick(['自販機「お客様の財布、そろそろ冬眠ですね」', '自販機「ツケは異世界でも不可です」', '自販機「その所持金で夢を語るのはやめましょう」'])); } });
+V('read-history', '購入履歴を読み上げる', 'comic', { w: 8, cond: () => S.buyOrder.length >= 3, run() { const l = S.buyOrder.slice(-3).map(i => ITEM[i].name); evMsg(`自販機「直近の購入履歴：${l.join('、')}。……計画性ゼロですね」`); } });
+V('strike', '自販機のストライキ', 'comic', { w: 6, cond: () => S.stats.purchases >= 6, run() { addMod({ id: 'holiday', name: '休日手当', mult: 1.1, turns: 4 }); evMsg('自販機「今日はもう働きたくありません。休日手当をいただきます」 全商品+10%（4アクション）'); } });
+V('wrong-name', '商品名の勘違い', 'comic', { w: 7, run() { const l = randItems(2, i => !isEquip(i)); if (l.length < 2) return; S.nameSwap = { a: l[0].id, b: l[1].id, until: S.clock + 5 }; evMsg('商品たちが名前を間違えて自己紹介している！ （5アクション）'); } });
+V('ad', '勝手に宣伝', 'comic', { w: 8, run() { const l = randItems(1, i => i.price > 20 && !i.unique); if (!l.length) return; addMod({ id: 'adsale', name: '自販機のイチオシ', mult: 0.8, ids: [l[0].id], turns: 5 }); evMsg(`自販機「イチオシは${l[0].name}です！ 今なら20%OFF！」（5アクション）`); } });
+V('misjudge-level', 'レベルの勘違い', 'comic', { w: 7, run() { evMsg(`自販機「ようこそ、レベル${S.player.level + rnd(8, 60)}の勇者様！」……実際はLv${S.player.level}だ。`); } });
+V('maou-coupon', '魔王のクーポンコード', 'comic', { w: 6, cd: 30, cond: () => S.stats.purchases >= 8 && !S.flags.couponUsed, run() { S.flags.couponCode = true; evMsg('魔王からクーポンコードが届いた！「MAOUGAKITA」→ 🔧メンテナンスコードに入力しよう。'); } });
+V('maker-peek', '製作者が口を出す', 'comic', { w: 6, cd: 20, run() { S.flags.makerMet = true; evMsg(pick(['声「そのアイテム、実装が大変だったらしいぞ。」', '声「この世界の価格設定に、製作者も自信がないらしい。」', '声「その商品は、最初はただのテストデータだった。」', '声「製作者はこの敵の調整で何度も失敗した。」'])); say('……今の声、聞こえましたか？'); } });
+V('maker-conflict', '製作者と自販機の食い違い', 'comic', { w: 5, cd: 30, cond: () => S.flags.makerMet, async run() {
+  evMsg('製作者と自販機の意見が食い違っている！');
+  const i = await askChoice('🧑‍💻 どっちに従う？', '声「ここは10%OFFにする仕様だ！」\n自販機「いいえ、50G持っていってください。」', ['製作者に従う（全商品10%OFF 5アクション）', '自販機に従う（+50G）']);
+  if (i === 0) { addMod({ id: 'makerdeal', name: '製作者仕様', mult: 0.9, turns: 5 }); evMsg('製作者「ほら見ろ」 全商品10%OFF。'); } else { addGold(50); evMsg('自販機「話の分かるお客様です」 +50G'); } } });
+V('regular', '常連認定', 'comic', { once: true, auto: true, cond: () => S.stats.purchases >= 10, run() { S.flags.regular = true; evMsg('自販機「お客様を『常連』と認定します。以降、3%引きにします」'); } });
+V('nag', '買わないと催促', 'comic', { manual: true, cd: 3, run() { evMsg(vmLine('nag')); } });
+V('mercy', '自販機の慈悲', 'comic', { w: 7, cd: 25, cond: () => S.player.gold < 50 && S.stats.purchases >= 3, run() { giveItem('water'); evMsg('自販機「見ていられません。水をサービスします」 普通の水を手に入れた。'); } });
+V('combo', '連続購入でテンション上昇', 'comic', { manual: true, cd: 4, run() { addMod({ id: 'combo', name: 'テンション価格', mult: 0.95, turns: 3 }); evMsg('自販機「連続お買い上げ！ テンション上がってきたぁ！」 全商品5%OFF（3アクション）'); } });
+V('gag-joy', 'ネタ商品に大喜び', 'comic', { manual: true, cd: 5, run() { addGold(5); evMsg('自販機「ネタ商品を買う勇者様、大好きです！」 5Gキャッシュバック。'); } });
+/* ---- 不思議・ホラー ---- */
+V('phantom-item', '存在しない商品', 'horror', { w: 7, cd: 25, cond: () => S.stats.purchases >= 5, run() { evMsg('商品一覧に、存在しない商品が一瞬だけ現れた…'); spawnPhantom(); } });
+V('glitch-display', '表示の乱れ', 'horror', { w: 7, cond: () => S.stats.purchases >= 5, run() { flashFx('glitch'); evMsg('ザザッ…自販機の表示が乱れた。'); say('ぁ……いらっ…しゃ…い……ませ'); } });
+V('misdelivered', '商品が別の場所に', 'horror', { w: 5, cd: 30, cond: () => S.lastBuyId && ITEM[S.lastBuyId] && ITEM[S.lastBuyId].price <= 100 && ITEM[S.lastBuyId].type === 'consumable', run() { const it = ITEM[S.lastBuyId]; if (!it) return; giveItem(it.id); evMsg(`買ったはずの${it.name}が、足元にもう1つ落ちていた。誰が置いた？`); } });
+V('shadow', '裏側の影', 'horror', { w: 6, cd: 30, cond: () => S.stats.purchases >= 8, run() { flashFx('shadow'); S.flags.makerMet = true; discoverStory('shadow'); evMsg('自販機の裏側に、誰かの影が映った…'); say('……今、私の裏側を見ましたか？'); } });
+V('name-soldout', '売り切れが名前に', 'horror', { w: 5, cd: 30, cond: () => S.stats.purchases >= 8, run() { const l = randItems(3, i => !i.unique); for (const i of l) S.blocked[i.id] = { until: S.clock + 4, label: S.player.name }; evMsg('売り切れの表示が、あなたの名前に変わっている…（4アクション）'); } });
+V('desc-log', '説明文に行動記録', 'horror', { w: 6, cd: 25, cond: () => S.stats.purchases >= 5, run() { const l = randItems(1, i => !isEquip(i)); if (!l.length) return; const last = S.lastBuyId && ITEM[S.lastBuyId] ? ITEM[S.lastBuyId].name : '何か'; S.descOverride[l[0].id] = { until: S.clock + 6, text: `${S.player.name}は先ほど${last}を購入した。……そして今、この説明文を読んでいる。` }; evMsg(`${l[0].name}の説明文が、あなたの行動を記録している…（6アクション）`); } });
+V('odd-receipt', '見覚えのないレシート', 'horror', { w: 5, cd: 40, cond: () => S.stats.purchases >= 6 && !owned('unknown-receipt'), run() { giveItem('unknown-receipt'); evMsg('所持品の中に、見覚えのないレシートが入っていた…'); } });
+V('freeze', '無反応', 'horror', { w: 5, cd: 30, cond: () => S.stats.purchases >= 6, run() { evMsg('自販機が反応しなくなった…'); lockUI(3500, '…… …… ……'); } });
+V('countdown', '謎のカウントダウン', 'horror', { w: 5, cd: 40, cond: () => S.stats.purchases >= 8, run() { evMsg('LEDに謎のカウントダウンが表示された！'); startCountdown(); } });
+V('inside-voice', '内部からの声', 'horror', { w: 6, cd: 30, cond: () => S.stats.purchases >= 10, run() { discoverStory('voice'); evMsg('自販機の内部から声が聞こえる。「ここは…どこ…」'); } });
+V('blackout', '暗転', 'horror', { manual: true, run() { flashFx('dark'); evMsg('呪われた炭酸を買った瞬間、画面がふっと暗くなった…'); say('……今、何かいましたね。'); } });
+V('desc-change', '説明文の変化', 'horror', { once: true, auto: true, cond: () => Object.values(S.buyCount).some(n => n >= 3), run() { evMsg('同じ商品を何度も買ったので、商品の説明文が変わった…。'); say('また、それを買うんですね。'); } });
+V('send-home', '「帰してほしい」', 'horror', { once: true, auto: true, cond: () => S.stats.purchases >= 25, run() { evMsg('自販機「……帰して、ほしい」'); say('……すみません、今のは聞かなかったことに。'); discoverStory('serial'); } });
+V('serial-change', 'シリアル番号の変化', 'horror', { w: 5, cd: 40, cond: () => S.stats.purchases >= 6, run() { S.serial = 'VM-' + String(rnd(1, 9999)).padStart(4, '0'); discoverStory('serial'); evMsg(`自販機のシリアル番号が ${S.serial} に変わった。`); } });
+V('build-record', '製造記録', 'horror', { w: 7, cd: 15, cond: () => S.stats.purchases >= 8 && !S.disc.story.record4, run() { const n = ['record1', 'record2', 'record3', 'record4'].find(i => !S.disc.story[i]); discoverStory(n); evMsg('自販機の隠された製造記録の一部が表示された。 図鑑で確認しよう。'); } });
+/* ---- 隠し・特殊 ---- */
+V('hidden-unlock', '隠し商品の解放', 'secret', { once: true, auto: true, cond: () => S.stats.purchases >= 30, run() { S.flags.newItem = true; evMsg('購入30回達成！ 隠し商品が解放された。'); say('常連様限定の商品です。たぶん。'); } });
+V('weapon-special', '武器専用セリフ', 'secret', { auto: true, cd: 30, cond: () => ['legendary-leek', 'talking-sword', 'wrench', 'maou-fork'].includes(S.equip.weapon), run() { const w = S.equip.weapon; evMsg('自販機が装備中の武器に反応した…'); say(pick(w === 'legendary-leek' ? LINES.weaponLeek : w === 'talking-sword' ? LINES.weaponTalking : w === 'wrench' ? LINES.weaponWrench : LINES.weaponFork)); } });
+V('expired-master', '賞味期限の達人', 'secret', { once: true, auto: true, cond: () => S.stats.expiredUsed >= 5, run() { addGold(100); gainExperience(50); evMsg('賞味期限切れ商品を5回使用！ 自販機「異世界の勇者ですね」 +100G 経験値+50'); } });
+V('gag-all', 'ネタ商品コンプリート', 'secret', { once: true, auto: true, cond: () => gagAll(), run() { evMsg('ネタ商品をすべて集めた！ 隠し商品「ネタ王の証」が解放された。'); say('……ここまで集めた人、初めて見ました。'); } });
+V('after-guardian', '守護者撃破後', 'secret', { once: true, auto: true, cond: () => defd('vm-guardian'), run() { evMsg('守護者を倒した勇者へ、自販機の品ぞろえが変化した。'); say('……あの子は、私の古い友達でした。'); } });
+V('after-maou', '魔王撃破後', 'secret', { once: true, auto: true, cond: () => defd('maou'), run() { evMsg('魔王撃破後、自販機に新しい会話が追加された。'); say('魔王様の缶コーヒーの注文が、止まりました。'); } });
+V('level-line-10', 'レベル10のセリフ', 'secret', { once: true, auto: true, cond: () => S.player.level >= 10, run() { evMsg('レベル10：自販機のセリフが変化した。'); say('お客様、いつの間にか強くなりましたね。商品が追いついておりません。'); } });
+V('level-line-20', 'レベル20のセリフ', 'secret', { once: true, auto: true, cond: () => S.player.level >= 20, run() { evMsg('レベル20：自販機のセリフが変化した。'); say('そろそろ、この世界の秘密を話してもいい頃かもしれません。'); } });
+V('gold-777', '所持金777G', 'secret', { once: true, auto: true, cond: () => S.player.gold === 777, run() { giveItem('lucky-gacha-ball'); evMsg('所持金がぴったり777G！ 自販機が「幸運のガチャ玉」をくれた。'); } });
+V('gold-zero', '所持金ゼロ', 'secret', { once: true, auto: true, cond: () => S.player.gold === 0 && S.stats.purchases >= 3, run() { addGold(60); evMsg('ゴールドを使い切った！ 自販機「お客様のために貸し出しです」 +60G'); } });
+V('hold-bonus', '所持品ボーナス', 'secret', { manual: true, run() { evMsg('特定の商品を持ったまま敵に勝ち、追加報酬を獲得した！'); } });
+V('maker-collect', '製作者グッズの収集', 'secret', { once: true, auto: true, cond: () => makerCount() >= 3, run() { S.flags.makerMet = true; evMsg('声「おい、僕のものを集めているのか？ ……ならば出てきてやる」 「製作者の分身」が戦いを挑んでくるようになった。'); } });
+V('all-cat', '全カテゴリ制覇', 'secret', { once: true, auto: true, cond: () => CATS.filter(c => c.id !== 'all').every(c => ITEMS.some(i => i.cat === c.id && S.disc.items[i.id])), run() { addGold(100); evMsg('全カテゴリの商品を入手！ 自販機「お見事です。当店のことを世界一理解されています」 +100G'); } });
+V('vm-rename', '自販機の名前変化', 'secret', { once: true, auto: true, cond: () => S.stats.purchases >= 40, run() { S.vmName = '自販機（常連仕様）'; evMsg('自販機の名前が「自販機（常連仕様）」に変わった。'); } });
+V('vm-rename2', '自販機の改名', 'secret', { once: true, auto: true, cond: () => defd('rampage-vm'), run() { S.vmName = 'ベンダー'; evMsg('自販機の名前が「ベンダー」に変わった。ずっと、そう呼ばれたかったらしい。'); } });
+V('seq-buy', '隠しコマンド：購入順', 'secret', { once: true, auto: true, cond: () => { const o = S.buyOrder.slice(-3); return o[0] === 'water' && o[1] === 'premium-water' && o[2] === 'energy'; }, run() { S.flags.seqUnlock = true; evMsg('水→高級水→エナジー。隠しコマンド成立！ 「裏メニュー缶」が解放された。'); say('……よくご存じで。'); } });
+V('poke-secret', '自販機をつつきすぎる', 'secret', { manual: true, run() { giveItem('spare-button'); evMsg('つつきすぎた！ 自販機「そんなに押したいなら、これをどうぞ」 予備の予備のボタンを手に入れた。'); } });
+V('konami', 'あの呪文', 'secret', { manual: true, run() { addGold(100); evMsg('↑↑↓↓←→←→BA！ 自販機「……何ですか、その呪文は」 +100G'); } });
+V('debug-cmd', 'デバッグコマンド', 'secret', { manual: true, run() { flashFx('glitch'); evMsg('不正なコマンド。……世界のどこかに、バグの集合体が現れた。 バトル画面を確認しよう。'); say('ちょっと！ 触ってはいけないところです！'); } });
+V('secret-truth', '世界の裏側の一端', 'secret', { once: true, auto: true, cond: () => STORIES.filter(s => S.disc.story[s.id]).length >= 10, run() { evMsg('記録がつながった。自販機は偶然転移したのではなく、誰かが設置したようだ。'); say('そうです。私は、誰かの手でここに置かれました。'); } });
+V('end-seller-hint', '終末の気配', 'secret', { once: true, auto: true, cond: () => defd('true-owner'), run() { evMsg('真の所有者を倒した。遠くで、誰かが在庫を数えている。'); } });
+VEV.forEach(e => { VEVM[e.id] = e; });
+
+/* ---------- イベント実行エンジン ---------- */
+function evEligible(ev) {
+  if (ev.once && S.evDone[ev.id]) return false;
+  if (S.lastEvent === ev.id) return false;
+  if (ev.cd && S.evCd[ev.id] != null && S.clock - S.evCd[ev.id] < ev.cd) return false;
+  try { if (ev.cond && !ev.cond()) return false; } catch (e) { return false; }
+  return true;
+}
+async function triggerEvent(id) {
+  const ev = VEVM[id]; if (!ev || evBusy || (B && !B.over)) return false;
+  evBusy = true;
+  try {
+    S.disc.events[id] = (S.disc.events[id] || 0) + 1; S.evCd[id] = S.clock; if (ev.once) S.evDone[id] = true; S.lastEvent = id;
+    if (typeof sfx === 'function') sfx(ev.kind === 'horror' ? 'eerie' : ev.kind === 'secret' ? 'secret' : 'event');
+    await ev.run();
+  } catch (e) { console.error('event error', id, e); }
+  finally { evBusy = false; checkAchievements(); checkUnlocks(); refresh(); }
+  return true;
+}
+function rollVendingEvent(trigger) {
+  if (evBusy || uiLocked || curView !== 'vending' || (B && !B.over)) return;
+  if (!chance(trigger === 'buy' ? 0.3 : 0.4)) return;
+  const c = VEV.filter(e => !e.auto && !e.manual && evEligible(e));
+  const ev = wpick(c, e => e.w); if (ev) triggerEvent(ev.id);
+}
+function checkAutoEvents() {
+  if (evBusy || curView !== 'vending' || (B && !B.over)) return;
+  for (const ev of VEV) if (ev.auto && evEligible(ev)) { triggerEvent(ev.id); return; }
+}
+
+/* =====================================================================
+   p5: UI（HUD・自販機画面・モーダル・持ち物・図鑑・実績・設定）
+   ===================================================================== */
+let curView = 'vending', vendCat = 'all';
+const liveRenders = [];
+let eventBannerTimer = null;
+let ledOverride = null;
+
+/* ---------- 汎用UI ---------- */
+function toast(text, cls) {
+  const root = $('#toast-root'); if (!root) return;
+  const t = el('div', 'toast ' + (cls || ''), text); root.appendChild(t);
+  while (root.children.length > 4) root.removeChild(root.firstChild);
+  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 400); }, 3200);
+}
+function showBanner(title, sub, cls) {
+  const root = $('#fx-layer'); if (!root) return;
+  const b = el('div', 'banner ' + (cls || '')); b.appendChild(el('div', 'banner-t', title)); if (sub) b.appendChild(el('div', 'banner-s', sub));
+  root.appendChild(b); setTimeout(() => b.remove(), 2600);
+}
+function flashFx(cls) {
+  const app = $('#app'); if (!app) return;
+  if (reducedMotion() && cls !== 'rare') return;
+  app.classList.add('fx-' + cls); setTimeout(() => app.classList.remove('fx-' + cls), cls === 'dark' ? 1400 : 900);
+}
+function floatText(target, text, cls) {
+  if (!target) return; const f = el('span', 'float ' + (cls || ''), text); target.appendChild(f); setTimeout(() => f.remove(), 1100);
+}
+function showEventBanner(text) {
+  const b = $('#event-banner'); if (!b) return;
+  b.hidden = false; b.textContent = '🎪 ' + text; b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop');
+  clearTimeout(eventBannerTimer); eventBannerTimer = setTimeout(() => { b.hidden = true; }, 9000);
+}
+function lockUI(ms, text) {
+  uiLocked = true; const v = $('#view-vending'); const o = el('div', 'lock-overlay', text); if (v) v.appendChild(o);
+  setTimeout(() => { uiLocked = false; o.remove(); refresh(); }, ms);
+}
+
+/* ---------- モーダル ---------- */
+const modalStack = [];
+function openModal(o) {
+  const root = $('#modal-root'); const back = el('div', 'modal-back'); const m = el('div', 'modal ' + (o.cls || ''));
+  m.setAttribute('role', 'dialog'); m.setAttribute('aria-modal', 'true');
+  const head = el('div', 'modal-head'); head.appendChild(el('h2', '', o.title || ''));
+  const api = { el: m, back, body: null, render: null, close() { const i = modalStack.indexOf(api); if (i >= 0) modalStack.splice(i, 1); const li = liveRenders.indexOf(api.render); if (li >= 0) liveRenders.splice(li, 1); back.remove(); if (o.onClose) o.onClose(); } };
+  if (o.closable !== false) { const x = el('button', 'modal-x', '✕'); x.setAttribute('aria-label', '閉じる'); x.onclick = () => api.close(); head.appendChild(x); }
+  const body = el('div', 'modal-body'); api.body = body;
+  m.appendChild(head); m.appendChild(body);
+  if (o.render) { api.render = () => { const st = body.scrollTop; body.textContent = ''; o.render(body, api); body.scrollTop = st; }; api.render(); liveRenders.push(api.render); }
+  else if (o.body) body.appendChild(o.body);
+  if (o.buttons) { const f = el('div', 'modal-foot'); for (const b of o.buttons) { const bt = el('button', 'btn ' + (b.cls || ''), b.label); bt.onclick = () => { if (b.keep !== true) api.close(); if (b.fn) b.fn(); }; f.appendChild(bt); } m.appendChild(f); }
+  back.appendChild(m);
+  if (o.closable !== false) back.addEventListener('pointerdown', e => { if (e.target === back) api.close(); });
+  root.appendChild(back); modalStack.push(api); api.closable = o.closable !== false;
+  const first = m.querySelector('button.btn,button'); if (first) setTimeout(() => { try { first.focus({ preventScroll: true }); } catch (e) {} }, 30);
+  return api;
+}
+function askChoice(title, text, choices) {
+  return new Promise(res => {
+    const body = el('div', 'choice-body'); body.appendChild(el('p', 'choice-text', text));
+    const api = openModal({ title, cls: 'choice', closable: false, body });
+    const f = el('div', 'choice-list');
+    choices.forEach((c, i) => { const b = el('button', 'btn', c); b.onclick = () => { api.close(); res(i); }; f.appendChild(b); });
+    body.appendChild(f);
+  });
+}
+function confirmModal(title, text, yes, fn) {
+  const body = el('div'); body.appendChild(el('p', 'choice-text', text));
+  const api = openModal({ title, cls: 'choice', body });
+  const f = el('div', 'choice-list'); const y = el('button', 'btn danger', yes); y.onclick = () => { api.close(); fn(); };
+  const n = el('button', 'btn', 'やめる'); n.onclick = () => api.close(); f.appendChild(y); f.appendChild(n); body.appendChild(f);
+}
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && modalStack.length) { const m = modalStack[modalStack.length - 1]; if (m.closable) m.close(); }
+});
+
+/* ---------- HUD ---------- */
+function renderHUD() {
+  const p = S.player; const tot = totalMaxHp();
+  $('#h-name').textContent = p.name; $('#h-lv').textContent = p.level;
+  const hpPct = clamp(p.hp / tot * 100, 0, 100);
+  const hb = $('#h-hpbar'); hb.style.width = hpPct + '%'; hb.className = hpPct < 25 ? 'low' : hpPct < 50 ? 'mid' : '';
+  $('#h-hp').textContent = `${Math.max(0, Math.ceil(p.hp))} / ${tot}`;
+  const need = nextExp(p.level);
+  if (p.level >= MAX_LV) { $('#h-expbar').style.width = '100%'; $('#h-exp').textContent = 'MAX'; }
+  else { $('#h-expbar').style.width = clamp(p.exp / need * 100, 0, 100) + '%'; $('#h-exp').textContent = `${p.exp} / ${need}`; }
+  $('#h-gold').textContent = p.gold.toLocaleString();
+  $('#h-weapon').textContent = '⚔️ ' + (weapon() ? weapon().name : 'なし'); $('#h-armor').textContent = '🛡️ ' + (armor() ? armor().name : 'なし');
+  const hs = $('#h-status'); hs.textContent = ''; hs.appendChild(statusChips(p));
+  $('#btn-bgm').classList.toggle('off', !S.settings.bgm); $('#btn-sfx').classList.toggle('off', !S.settings.sfx);
+  $('#btn-bgm').setAttribute('aria-pressed', String(S.settings.bgm)); $('#btn-sfx').setAttribute('aria-pressed', String(S.settings.sfx));
+  renderTicker();
+}
+function renderTicker() { const t = $('#h-ticker'); if (!t) return; const l = S.log[S.log.length - 1]; t.textContent = '📜 ' + (l ? l.t : 'ようこそ、異世界自販機へ。'); }
+
+/* ---------- 画面切り替え ---------- */
+function switchView(v) {
+  if (v === 'vending' && B && !B.over) { toast('戦闘中は自販機に近づけない！'); return; }
+  if (v === curView) return;
+  if (curView === 'battle' && B && B.over) B = null;
+  curView = v;
+  for (const x of document.querySelectorAll('.view')) x.classList.toggle('active', x.id === 'view-' + v);
+  for (const b of document.querySelectorAll('#taskbar [data-view]')) b.classList.toggle('on', b.dataset.view === v);
+  if (typeof sfx === 'function') sfx('click');
+  if (typeof setBgmFor === 'function') setBgmFor();
+  if (v === 'vending') visitVending();
+  refresh();
+}
+
+/* ---------- 自販機画面 ---------- */
+function buildVending() {
+  $('#view-vending').innerHTML = `
+  <div class="vend-layout">
+    <aside class="vm-col">
+      <div class="vm" id="vm" aria-label="自販機（クリックでつつける）">
+        <div class="vm-head"><span id="vm-name"></span><span id="vm-serial"></span></div>
+        <div class="vm-window" id="vm-window"></div>
+        <div class="vm-front"><div class="vm-led" id="vm-led"></div><div class="vm-pad"><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="vm-coin"><span>COIN</span></div></div>
+        <div class="vm-out" id="vm-out"><span>取り出し口</span></div>
+      </div>
+      <div class="bubble" id="vm-bubble"></div>
+      <div id="event-banner" class="event-banner" hidden></div>
+      <div id="vm-mods" class="mods"></div>
+      <div class="vm-tools"><button class="btn small" id="btn-code">🔧 メンテナンスコード</button><button class="btn small" id="btn-rest">🪑 ベンチで休む</button></div>
+      <div class="panel"><h3>📜 イベントログ</h3><div id="vm-log" class="logbox"></div></div>
+    </aside>
+    <section class="shop-col" id="shop-col">
+      <div id="cat-tabs" class="cat-tabs" role="tablist"></div>
+      <div id="item-grid" class="item-grid"></div>
+    </section>
+  </div>`;
+  $('#vm').addEventListener('click', e => { if (e.target.closest('button')) return; pokeMachine(); });
+  $('#btn-code').onclick = openCodeModal;
+  $('#btn-rest').onclick = restAtBench;
+}
+function renderLed() { const l = $('#vm-led'); if (l) l.textContent = ledOverride != null ? ledOverride : `${S.player.gold.toLocaleString()} G`; }
+function renderVending() {
+  if (!$('#vm-name')) return;
+  $('#vm-name').textContent = S.vmName; $('#vm-serial').textContent = S.serial; renderLed();
+  const win = $('#vm-window'); win.textContent = '';
+  visibleItems().filter(i => !isEquip(i)).slice(0, 12).forEach(i => { const c = el('span', 'vm-slot', i.icon); win.appendChild(c); });
+  const mods = $('#vm-mods'); mods.textContent = '';
+  for (const m of activeMods()) { const d = Math.round((m.mult - 1) * 100); mods.appendChild(el('span', 'chip ' + (m.mult < 1 ? 'good' : 'bad'), `🏷️ ${m.name} ${d < 0 ? d : '+' + d}%（残${m.until - S.clock}）`)); }
+  if (S.quota) mods.appendChild(el('span', 'chip good', `📋 ノルマ ${S.quota.done}/${S.quota.need}（残${Math.max(0, S.quota.until - S.clock)}）報酬${S.quota.reward}G`));
+  if (S.rebel) mods.appendChild(el('span', 'chip bad', '🙅 自販機が反抗期'));
+  if (S.atari) mods.appendChild(el('span', 'chip good', '🎯 次の購入は当たり？'));
+  if (S.contract > 0) mods.appendChild(el('span', 'chip bad', `📄 契約：あと${S.contract}戦`));
+  const bub = $('#vm-bubble'); if (!bub.textContent) bub.textContent = S.vmText || vmLine('visit');
+  const rb = $('#btn-rest'); rb.textContent = `🪑 ベンチで休む（${restCost()}G）`; rb.disabled = S.player.hp >= totalMaxHp();
+  const lb = $('#vm-log'); lb.textContent = ''; for (const l of S.log.slice(-14).reverse()) lb.appendChild(el('div', 'logline ' + l.c, l.t));
+  // カテゴリ
+  const tabs = $('#cat-tabs'); tabs.textContent = '';
+  for (const c of CATS) {
+    const n = visibleItems().filter(i => c.id === 'all' || i.cat === c.id).length; if (c.id !== 'all' && !n && !ITEMS.some(i => i.cat === c.id && itemVisible(i))) continue;
+    const b = el('button', 'tab' + (vendCat === c.id ? ' on' : ''), `${c.icon} ${c.name}`); b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', String(vendCat === c.id));
+    b.onclick = () => { vendCat = c.id; if (typeof sfx === 'function') sfx('click'); renderVending(); }; tabs.appendChild(b);
+  }
+  const grid = $('#item-grid'); grid.textContent = '';
+  const list = ITEMS.filter(i => itemVisible(i) && (vendCat === 'all' || i.cat === vendCat)).sort((a, b) => (itemUnlocked(b) - itemUnlocked(a)) || (a.price - b.price));
+  for (const it of list) grid.appendChild(buildCard(it));
+  if (!list.length) grid.appendChild(el('p', 'empty', 'このカテゴリの商品はまだない。'));
+}
+function buildCard(it) {
+  const unlocked = itemUnlocked(it), left = stockLeft(it), blocked = isBlocked(it.id), price = getPrice(it);
+  const soldout = unlocked && (blocked || left <= 0);
+  const card = el('article', `card r-${it.rar}${!unlocked ? ' locked' : ''}${soldout ? ' soldout' : ''}`);
+  const top = el('div', 'card-top'); top.appendChild(el('span', 'card-icon', unlocked ? it.icon : '❓'));
+  const nm = el('div', 'card-name'); nm.appendChild(el('b', '', unlocked ? dispName(it) : '？？？'));
+  nm.appendChild(el('span', 'tag', unlocked ? RARITY[it.rar] : 'LOCKED')); top.appendChild(nm); card.appendChild(top);
+  if (!unlocked) { card.appendChild(el('p', 'desc', condText(it.un) || '特別な条件で解放される。')); const b = el('button', 'btn buy', '🔒 未解放'); b.disabled = true; card.appendChild(b); return card; }
+  card.appendChild(el('p', 'desc', dispDesc(it)));
+  card.appendChild(el('p', 'eff', '▶ ' + effectText(it)));
+  const meta = el('div', 'meta'); meta.appendChild(el('span', '', `所持 ${owned(it.id)}`)); meta.appendChild(el('span', '', useWhere(it)));
+  if (it.stock != null) meta.appendChild(el('span', left <= 0 ? 'bad' : '', `在庫 ${Math.max(0, left)}`));
+  if (it.expired) meta.appendChild(el('span', 'bad', '賞味期限切れ')); card.appendChild(meta);
+  const row = el('div', 'buy-row'); const pr = el('div', 'price');
+  if (price !== it.price) { pr.appendChild(el('s', '', it.price + 'G')); pr.appendChild(el('b', price < it.price ? 'sale' : 'up', price + 'G')); } else pr.appendChild(el('b', '', price + 'G'));
+  row.appendChild(pr);
+  const b = el('button', 'btn buy', '購入'); let reason = '';
+  if (blocked) { b.textContent = S.blocked[it.id].label || 'SOLD OUT'; reason = '一時的に購入できない'; b.disabled = true; }
+  else if (left <= 0) { b.textContent = 'SOLD OUT'; reason = '再入荷はバトル後'; b.disabled = true; }
+  else if (isEquip(it) && owned(it.id) > 0) { b.textContent = '所持済み'; b.disabled = true; }
+  else if (S.player.gold < price) { b.textContent = '購入'; b.disabled = true; reason = `ゴールド不足（あと${price - S.player.gold}G）`; }
+  else b.onclick = () => buyItem(it.id);
+  row.appendChild(b); card.appendChild(row);
+  if (isEquip(it) && owned(it.id) > 0 && S.equip[it.type] !== it.id) { const e = el('button', 'btn small', '装備する'); e.onclick = () => equipItem(it.id); card.appendChild(e); }
+  if (reason) card.appendChild(el('p', 'reason', reason));
+  return card;
+}
+function vendFx(it) {
+  const out = $('#vm-out'); if (out) { const i = el('span', 'drop', it.icon); out.appendChild(i); setTimeout(() => i.remove(), 900); }
+  const vm = $('#vm'); if (vm) { vm.classList.remove('buyflash'); void vm.offsetWidth; vm.classList.add('buyflash'); }
+}
+function spawnEscapee() {
+  const host = $('#shop-col'); if (!host) return;
+  const b = el('button', 'escapee', pick(['🥤', '🍙', '🧪', '🥫'])); b.setAttribute('aria-label', '逃げた商品を捕まえる');
+  const mv = () => { b.style.left = rnd(5, 85) + '%'; b.style.top = rnd(8, 80) + '%'; }; mv();
+  const iv = setInterval(mv, reducedMotion() ? 1600 : 700);
+  const end = setTimeout(() => { clearInterval(iv); b.remove(); log('商品は逃げ切ってしまった…'); }, 8000);
+  b.onclick = () => { clearInterval(iv); clearTimeout(end); b.remove(); const id = pick(['small-potion', 'potion', 'onigiri', 'energy', 'water', 'manju']); giveItem(id); evMsg(`逃げ回る商品を捕まえた！ ${ITEM[id].name}を手に入れた。`); sfx('buy'); refresh(); };
+  host.appendChild(b);
+}
+function spawnPhantom() {
+  const host = $('#shop-col'); if (!host) return;
+  const b = el('button', 'phantom', '？？？の缶'); host.appendChild(b);
+  const end = setTimeout(() => b.remove(), 3500);
+  b.onclick = () => { clearTimeout(end); b.remove(); giveItem('phantom-can'); evMsg('幻の缶を掴んだ！ ……手の中に確かにある。'); sfx('rare'); refresh(); };
+}
+function startCountdown() {
+  let n = 10; ledOverride = String(n).padStart(2, '0'); renderLed();
+  const iv = setInterval(() => {
+    n--; if (n < 0) { clearInterval(iv); ledOverride = null; addGold(50); evMsg('カウントダウンが0になった。……何も起きなかった。と思ったら小銭が落ちてきた。+50G'); say('今のは…忘れてください。'); refresh(); return; }
+    ledOverride = String(n).padStart(2, '0'); renderLed();
+  }, 1000);
+}
+function openCodeModal() {
+  const body = el('div'); body.appendChild(el('p', 'choice-text', 'メンテナンスパネルにコードを入力してください。'));
+  const inp = el('input', 'input'); inp.type = 'text'; inp.maxLength = 24; inp.placeholder = 'コード…'; inp.setAttribute('aria-label', 'メンテナンスコード');
+  const res = el('p', 'code-res', ''); const go = el('button', 'btn', '入力');
+  const doIt = () => { res.textContent = runCommand(inp.value); inp.value = ''; };
+  go.onclick = doIt; inp.addEventListener('keydown', e => { if (e.key === 'Enter') doIt(); });
+  body.appendChild(inp); body.appendChild(go); body.appendChild(res);
+  openModal({ title: '🔧 メンテナンスコード', cls: 'choice', body });
+  setTimeout(() => inp.focus(), 50);
+}
+
+/* ---------- 持ち物 ---------- */
+let invFilter = 'all';
+function openInventory() {
+  openModal({
+    title: '🎒 持ち物・装備', cls: 'wide',
+    render(body) {
+      const st = el('div', 'stat-box');
+      const wtxt = weapon() ? `${weapon().name}（+${weapon().atk}）` : 'なし', atxt = armor() ? `${armor().name}（+${armor().def}${armor().hp ? ` HP+${armor().hp}` : ''}）` : 'なし';
+      st.appendChild(el('div', '', `Lv${S.player.level}　HP ${S.player.hp}/${totalMaxHp()}　攻撃 ${totalAtk()}（基礎${S.player.baseAtk}）　防御 ${totalDef()}（基礎${S.player.baseDef}）`));
+      const w = el('div', 'slot', `⚔️ 武器：${wtxt} `); if (weapon() && S.equip.weapon !== 'wooden-stick') { const b = el('button', 'btn small', 'はずす'); b.disabled = !!(B && !B.over); b.onclick = () => unequip('weapon'); w.appendChild(b); }
+      const a = el('div', 'slot', `🛡️ 防具：${atxt} `); if (armor()) { const b = el('button', 'btn small', 'はずす'); b.disabled = !!(B && !B.over); b.onclick = () => unequip('armor'); a.appendChild(b); }
+      st.appendChild(w); st.appendChild(a); st.appendChild(el('div', 'small', `ゲーム内行動回数：${S.clock}　購入${S.stats.purchases}回　勝利${S.stats.wins}　敗北${S.stats.losses}`)); body.appendChild(st);
+      const tabs = el('div', 'cat-tabs');
+      for (const [id, n] of [['all', 'すべて'], ['use', '使うもの'], ['weapon', '武器'], ['armor', '防具'], ['other', 'その他']]) { const b = el('button', 'tab' + (invFilter === id ? ' on' : ''), n); b.onclick = () => { invFilter = id; liveRenders.forEach(f => f()); }; tabs.appendChild(b); }
+      body.appendChild(tabs);
+      const ids = Object.keys(S.inv).filter(id => ITEM[id]).filter(id => { const it = ITEM[id]; return invFilter === 'all' || (invFilter === 'use' && (it.type === 'consumable')) || (invFilter === 'weapon' && it.type === 'weapon') || (invFilter === 'armor' && it.type === 'armor') || (invFilter === 'other' && (it.type === 'collect' || it.type === 'key')); });
+      if (!ids.length) body.appendChild(el('p', 'empty', '該当するアイテムはない。'));
+      const list = el('div', 'inv-list');
+      for (const id of ids) {
+        const it = ITEM[id]; const row = el('div', `inv-row r-${it.rar}`);
+        row.appendChild(el('span', 'card-icon', it.icon));
+        const info = el('div', 'inv-info'); const h = el('div', 'inv-name'); h.appendChild(el('b', '', it.name + ' ')); h.appendChild(el('span', 'tag', RARITY[it.rar])); h.appendChild(el('span', 'count', '×' + S.inv[id])); info.appendChild(h);
+        info.appendChild(el('div', 'small', it.desc)); info.appendChild(el('div', 'eff', '▶ ' + effectText(it)));
+        if (isEquip(it)) { const c = equipCompare(id); const same = S.equip[it.type] === id; info.appendChild(el('div', 'cmp', same ? '（装備中）' : `攻撃 ${c.cur.atk}→${c.next.atk}　防御 ${c.cur.def}→${c.next.def}　最大HP ${c.cur.hp}→${c.next.hp}`)); }
+        row.appendChild(info); const act = el('div', 'inv-act');
+        if (isEquip(it)) { const b = el('button', 'btn small', S.equip[it.type] === id ? '装備中' : '装備'); b.disabled = S.equip[it.type] === id || !!(B && !B.over); b.onclick = () => equipItem(id); act.appendChild(b); }
+        else if (it.type !== 'key') { const b = el('button', 'btn small', '使う'); const inB = !!(B && !B.over); b.disabled = inB || !itemUsable(it, false); b.title = inB ? '戦闘中はバトルのコマンドから使用' : (b.disabled ? '戦闘中のみ使用可' : ''); b.onclick = () => useItem(id, { battle: false }); act.appendChild(b); }
+        row.appendChild(act); list.appendChild(row);
+      }
+      body.appendChild(list);
+    }
+  });
+}
+
+/* ---------- 図鑑 ---------- */
+let dexTab = 'item';
+function openDex() {
+  openModal({
+    title: '📖 図鑑', cls: 'wide',
+    render(body) {
+      const tabs = el('div', 'cat-tabs');
+      for (const [id, n] of [['item', '商品'], ['weapon', '武器'], ['armor', '防具'], ['enemy', '敵'], ['event', 'イベント'], ['story', 'ストーリー']]) {
+        const r = dexRate(id); const b = el('button', 'tab' + (dexTab === id ? ' on' : ''), `${n} ${r.have}/${r.total}`); b.onclick = () => { dexTab = id; liveRenders.forEach(f => f()); }; tabs.appendChild(b);
+      }
+      body.appendChild(tabs);
+      const r = dexRate(dexTab); const pb = el('div', 'bar exp wide'); const i = el('i'); i.style.width = (r.rate * 100) + '%'; pb.appendChild(i); pb.appendChild(el('span', '', `収集率 ${Math.floor(r.rate * 100)}%（${r.have}/${r.total}）`)); body.appendChild(pb);
+      const grid = el('div', 'dex-grid');
+      if (dexTab === 'item' || dexTab === 'weapon' || dexTab === 'armor') {
+        const list = ITEMS.filter(i => dexTab === 'item' ? !isEquip(i) : i.type === dexTab);
+        for (const it of list) { const got = !!S.disc.items[it.id]; const c = el('div', `dex-card r-${got ? it.rar : 'none'}`); c.appendChild(el('span', 'card-icon', got ? it.icon : '❓')); const d = el('div'); d.appendChild(el('b', '', got ? it.name : '？？？')); d.appendChild(el('div', 'small', got ? it.desc : '未発見')); if (got) { d.appendChild(el('div', 'small', `${CAT_NAME[it.cat]}／${RARITY[it.rar]}／定価${it.price}G／所持${owned(it.id)}`)); d.appendChild(el('div', 'eff', '▶ ' + effectText(it))); } c.appendChild(d); grid.appendChild(c); }
+      } else if (dexTab === 'enemy') {
+        for (const e of ENEMIES) {
+          const got = !!S.disc.enemies[e.id]; const c = el('div', 'dex-card' + (e.boss ? ' boss' : '')); c.appendChild(el('span', 'card-icon', got ? e.icon : '❓')); const d = el('div');
+          d.appendChild(el('b', '', got ? e.name + (e.boss ? '【BOSS】' : '') : '？？？'));
+          if (got) { const s = enemyStats(e, e.lv); d.appendChild(el('div', 'small', e.desc)); d.appendChild(el('div', 'small', `Lv${e.lv} HP${s.hp} 攻${s.atk} 防${s.def} 経験値${s.exp} ${s.gold}G　弱点:${e.weak ? EL[e.weak] : 'なし'} 耐性:${e.res ? EL[e.res] : 'なし'}　撃破${S.defeated[e.id] || 0}回`)); d.appendChild(el('div', 'small', e.bio || '')); }
+          else d.appendChild(el('div', 'small', e.secret ? '？？？（条件不明）' : '未遭遇'));
+          c.appendChild(d); grid.appendChild(c);
+        }
+      } else if (dexTab === 'event') {
+        for (const e of VEV) { const n = S.disc.events[e.id]; const c = el('div', 'dex-card'); c.appendChild(el('span', 'card-icon', n ? ({ normal: '🎪', comic: '🤡', horror: '👁️', secret: '🗝️' })[e.kind] : '❓')); const d = el('div'); d.appendChild(el('b', '', n ? e.name : '？？？')); d.appendChild(el('div', 'small', n ? `発生${n}回` : '未発見')); c.appendChild(d); grid.appendChild(c); }
+        for (const e of BEV) { const n = S.disc.events['b:' + e.id]; const c = el('div', 'dex-card'); c.appendChild(el('span', 'card-icon', n ? '⚔️' : '❓')); const d = el('div'); d.appendChild(el('b', '', n ? '戦闘：' + e.name : '？？？')); d.appendChild(el('div', 'small', n ? `発生${n}回` : '未発見')); c.appendChild(d); grid.appendChild(c); }
+      } else {
+        for (const s of STORIES) { const got = S.disc.story[s.id]; const c = el('div', 'dex-card story'); c.appendChild(el('span', 'card-icon', got ? '📖' : '❓')); const d = el('div'); d.appendChild(el('b', '', got ? s.t : '？？？')); d.appendChild(el('div', 'small', got ? s.x : '未発見の記録')); c.appendChild(d); grid.appendChild(c); }
+      }
+      body.appendChild(grid);
+    }
+  });
+}
+
+/* ---------- 実績 ---------- */
+function openAchievements() {
+  openModal({
+    title: '🏆 実績', cls: 'wide',
+    render(body) {
+      const n = ACHS.filter(a => S.ach[a.id]).length;
+      const pb = el('div', 'bar exp wide'); const i = el('i'); i.style.width = (n / ACHS.length * 100) + '%'; pb.appendChild(i); pb.appendChild(el('span', '', `${n} / ${ACHS.length}`)); body.appendChild(pb);
+      const list = el('div', 'dex-grid');
+      for (const a of ACHS) {
+        const got = !!S.ach[a.id]; const hide = a.secret && !got; const c = el('div', 'dex-card' + (got ? ' got' : ''));
+        c.appendChild(el('span', 'card-icon', got ? '🏆' : '🔒')); const d = el('div'); d.appendChild(el('b', '', hide ? '？？？' : a.name)); d.appendChild(el('div', 'small', hide ? '隠し実績' : a.desc));
+        const rw = []; if (a.reward.gold) rw.push(a.reward.gold + 'G'); if (a.reward.exp) rw.push('経験値' + a.reward.exp); if (!hide && rw.length) d.appendChild(el('div', 'small', '報酬：' + rw.join('・') + (got ? '（受取済）' : '')));
+        c.appendChild(d); list.appendChild(c);
+      }
+      body.appendChild(list);
+    }
+  });
+}
+
+/* ---------- ログ・設定 ---------- */
+function openLog() { openModal({ title: '📜 イベントログ', render(body) { const l = el('div', 'logbox tall'); for (const x of S.log.slice().reverse()) l.appendChild(el('div', 'logline ' + x.c, x.t)); body.appendChild(l); } }); }
+function openSettings() {
+  openModal({
+    title: '⚙️ 設定', cls: 'choice',
+    render(body) {
+      const row = (label, on, fn) => { const r = el('div', 'set-row'); r.appendChild(el('span', '', label)); const b = el('button', 'btn small', on ? 'ON' : 'OFF'); b.onclick = fn; r.appendChild(b); body.appendChild(r); };
+      row('🎵 BGM', S.settings.bgm, () => { toggleBgm(); });
+      row('🔊 効果音', S.settings.sfx, () => { S.settings.sfx = !S.settings.sfx; if (S.settings.sfx) sfx('click'); refresh(); });
+      row('🌿 演出を抑える（動き・点滅を減らす）', S.settings.calm, () => { S.settings.calm = !S.settings.calm; document.body.classList.toggle('calm', S.settings.calm); refresh(); });
+      const nr = el('div', 'set-row'); const inp = el('input', 'input'); inp.maxLength = 12; inp.value = S.player.name; inp.setAttribute('aria-label', '勇者の名前');
+      const nb = el('button', 'btn small', '名前を変更'); nb.onclick = () => { const v = inp.value.trim().slice(0, 12); if (v) { S.player.name = v; toast('名前を変更した。'); refresh(); } }; nr.appendChild(inp); nr.appendChild(nb); body.appendChild(nr);
+      const sr = el('div', 'set-row'); const sb = el('button', 'btn small', '💾 今すぐセーブ'); sb.onclick = () => toast(saveGame() ? 'セーブした。（自動セーブも有効）' : 'セーブできない環境です。プレイは続けられます。'); sr.appendChild(sb);
+      const rb = el('button', 'btn small danger', '🗑️ データを消して最初から'); rb.onclick = () => confirmModal('本当にリセットしますか？', 'セーブデータは完全に削除され、元に戻せません。', 'リセットする', resetGame); sr.appendChild(rb); body.appendChild(sr);
+      const help = el('div', 'help'); help.appendChild(el('p', '', '【遊び方】自販機で商品を買って装備し、バトルで経験値とゴールドを稼いで強くなろう。ボスを倒すと物語が進む。'));
+      help.appendChild(el('p', '', '【ヒント】セールや在庫はバトルや購入のたびに変わる。隠し要素は、どこかにある。'));
+      body.appendChild(help);
+    }
+  });
+}
+function resetGame() {
+  try { localStorage.removeItem(SAVE_KEY); } catch (e) {}
+  S = newState(); B = null; seedAnnounced(); document.body.classList.toggle('calm', S.settings.calm);
+  while (modalStack.length) modalStack[modalStack.length - 1].close();
+  curView = 'vending'; for (const x of document.querySelectorAll('.view')) x.classList.toggle('active', x.id === 'view-vending');
+  for (const b of document.querySelectorAll('#taskbar [data-view]')) b.classList.toggle('on', b.dataset.view === 'vending');
+  buildBattleView(); S.vmText = ''; $('#vm-bubble').textContent = '';
+  setBgmFor(); saveGame(); refresh(); showIntro();
+}
+
+/* ---------- イントロ・エンディング ---------- */
+function showIntro() {
+  const body = el('div', 'intro');
+  body.appendChild(el('p', '', 'ある朝、あなたは見知らぬ草原で目を覚ました。目の前には、現代日本の自動販売機。'));
+  body.appendChild(el('p', 'vm-voice', '「いらっしゃいませ。異世界通貨にも対応しております。たぶん。」'));
+  body.appendChild(el('p', '', '自販機は意思を持ち、喋るらしい。所持金は300G。さあ、冒険を始めよう。'));
+  const inp = el('input', 'input'); inp.maxLength = 12; inp.value = S.player.name; inp.setAttribute('aria-label', '勇者の名前'); body.appendChild(el('label', 'small', '勇者の名前（あとで変更できます）')); body.appendChild(inp);
+  const b = el('button', 'btn primary', '冒険を始める');
+  const api = openModal({ title: '異世界自販機 〜勇者様、お金を入れてください〜', cls: 'choice', closable: false, body });
+  b.onclick = () => { const v = inp.value.trim().slice(0, 12); if (v) S.player.name = v; discoverStory('arrival'); api.close(); initAudio(); setBgmFor(); say(vmLine('visit')); refresh(); };
+  body.appendChild(b); setTimeout(() => inp.focus(), 50);
+}
+const ENDINGS = {
+  normal: { t: 'ENDING 1　魔王のいない異世界', x: ['魔王は倒れた。最後に、冷たい缶コーヒーを一本、受け取って。', '世界に平和が訪れた。……が、自販機の前には今日も行列ができている。', '「ご利用ありがとうございました。ですが、営業は続きます」', '自販機の内側から、かすかな声が聞こえる。「帰りたい」——それは、まだ終わらない物語の始まりだった。'] },
+  true: { t: 'TRUE ENDING　おかえりなさい', x: ['自販機の心臓が、静かに止まった。いや、止まったのではない。「休業中」の札が出たのだ。', '自販機は光に包まれ、元の世界の見慣れた路地裏に立っていた。', '「ありがとうございました。……勇者様、また、お金を入れてくださいね」', 'あなたのポケットには、一枚だけ異世界の硬貨が残っていた。'] },
+  hidden: { t: 'HIDDEN ENDING　製作者のあとがき', x: ['製作者は筆を置き、深く息をついた。「ここまで遊んでくれて、ありがとう」', '「実装が大変だった。バランスも、まだ自信がない。でも、君が遊んでくれたから完成した」', '画面の外から、拍手が聞こえる。', '《この世界の価格設定に、製作者も自信がない》——それでも、世界はここにある。'] },
+  bonus: { t: 'BONUS ENDING　取扱説明書の取扱説明書の取扱説明書', x: ['取扱説明書の取扱説明書を最後まで読んだ。そこには、こう書かれていた。', '「この商品を使う人は、きっと全部のネタ商品を集めた人です。……お疲れさまでした」', '最後のページ：「取扱説明書の取扱説明書の取扱説明書は、こちらです →（次のページはありません）」', '自販機は大喜びで、全商品を5分間だけ1Gで売ってくれた。（※嘘です）'] }
+};
+function showEnding(kind) {
+  const e = ENDINGS[kind]; if (!e) return; S.flags['end:' + kind] = true;
+  const body = el('div', 'ending'); e.x.forEach(l => body.appendChild(el('p', '', l)));
+  body.appendChild(el('p', 'small', '※エンディング後も、図鑑や実績の収集を続けられます。'));
+  const b = el('button', 'btn primary', '冒険を続ける'); body.appendChild(b);
+  const api = openModal({ title: e.t, cls: 'choice ending-modal', closable: false, body });
+  b.onclick = () => api.close();
+  if (typeof sfx === 'function') sfx('ending'); log(`🎬 ${e.t}`, 'ach'); checkAchievements(); refresh();
+}
+
+/* =====================================================================
+   p6: バトル（敵生成・ターン処理・行動・状態異常・報酬・UI）
+   ===================================================================== */
+function enemyStats(e, lv) {
+  return {
+    hp: Math.floor((20 + lv * 12 + lv * lv * 0.6) * e.hm), atk: Math.floor((5 + lv * 2.5) * e.am), def: Math.floor((1 + lv * 1.05) * e.dm),
+    exp: Math.floor((10 + lv * 8 + lv * lv * 1.6) * e.xm * (e.boss ? 4 : 1)), gold: Math.floor((8 + lv * 5 + lv * lv * 0.3) * e.gm * (e.boss ? 5 : 1))
+  };
+}
+function makeEnemy(def, lv) {
+  const s = enemyStats(def, lv);
+  return {
+    id: def.id, name: def.name, icon: def.icon, desc: def.desc, lv, boss: def.boss, noFlee: def.noFlee, tags: def.tags.slice(), weak: def.weak, res: def.res, resPhys: def.resPhys,
+    hp: s.hp, maxHp: s.hp, atk: s.atk, def: s.def, exp: s.exp, gold: s.gold, drops: def.drops, status: {}, shield: 0, stolen: 0, stolenItems: [],
+    guard: false, counter: false, secret: !!def.secret, fast: def.fast || 0, weakItems: def.weakItems || null, big: def.big || null, p: def.p, p2: def.p2 || null, rot: def.rot || null, say: def.say || [], maker: !!def.maker
+  };
+}
+const enemyAvailable = d => condOk(d.req) && (!d.reqFn || d.reqFn());
+function pickRandomEnemy() {
+  const pl = S.player.level;
+  let pool = ENEMIES.filter(e => !e.boss && !e.hidden && e.lv <= pl + 2 && e.lv >= pl - 5), lv = null;
+  if (!pool.length) { pool = ENEMIES.filter(e => !e.boss && !e.hidden).sort((a, b) => b.lv - a.lv).slice(0, 8); lv = Math.max(1, pl - 2); }
+  const e = wpick(pool, x => 1 / (1 + Math.abs(x.lv - pl)));
+  return { def: e, lv: lv ? Math.max(e.lv, lv) : e.lv };
+}
+
+/* ---------- 戦闘ログ ---------- */
+function blog(text, cls) {
+  if (!B) return; B.log.push({ t: text, c: cls || '' });
+  const box = $('#b-log'); if (box) { box.appendChild(el('div', 'logline ' + (cls || ''), text)); box.scrollTop = box.scrollHeight; }
+}
+
+/* ---------- 戦闘開始 ---------- */
+async function startBattle(enemyId, opts) {
+  opts = opts || {};
+  if (B && !B.over) { toast('すでに戦闘中だ！'); return; }
+  const def = ENEMY[enemyId]; if (!def) return;
+  if (!opts.force && !enemyAvailable(def)) { toast('この相手とはまだ戦えない。'); return; }
+  const lv = opts.lv || def.lv;
+  B = {
+    enemy: makeEnemy(def, lv), turn: 0, over: false, busy: true, defending: false, nextCrit: false, fleeBonus: 0, reveal: false, reflect: false, sealTurns: 0, enemySleep: 0, enemySkip: 0,
+    dodgeNext: false, extraAction: false, vmSupport: false, evCount: 0, prevHp: S.player.hp, inRound: false, intent: null, phase2: false, lastAct: null, log: [], result: null, menu: 'main'
+  };
+  S.player.status = {}; S.disc.enemies[def.id] = 1;
+  if (curView !== 'battle') { curView = 'battle'; for (const x of document.querySelectorAll('.view')) x.classList.toggle('active', x.id === 'view-battle'); for (const b of document.querySelectorAll('#taskbar [data-view]')) b.classList.toggle('on', b.dataset.view === 'battle'); }
+  setBgmFor(); sfx('encounter');
+  blog(`⚔️ ${B.enemy.name}（Lv${B.enemy.lv}）が現れた！`, 'ev');
+  if (B.enemy.say[0]) blog(`${B.enemy.name}「${B.enemy.say[0]}」`, 'quip');
+  if (def.boss) showBanner(def.name, 'BOSS BATTLE', 'boss');
+  renderBattle(); refresh();
+  await maybeBattleEvent('start');
+  await startRound();
+}
+async function startRound() {
+  if (!B || B.over) return;
+  B.turn++; B.inRound = false;
+  const e = B.enemy;
+  if (!B.phase2 && (e.p2 || e.boss) && e.hp <= e.maxHp * 0.5) { B.phase2 = true; blog(`${e.name}は本気を出してきた！`, 'ev'); if (e.say[1]) blog(`${e.name}「${e.say[1]}」`, 'quip'); sfx('phase'); }
+  await maybeBattleEvent('turn');
+  if (B.over) return;
+  if (e.hp <= 0) { finishBattle('win'); return; }
+  if (S.player.hp <= 0) { finishBattle('lose'); return; }
+  B.intent = chooseAction();
+  B.busy = false; renderBattle(); refresh();
+}
+function chooseAction() {
+  const e = B.enemy;
+  if (e.big && B.turn % e.big.every === 0) return { t: e.big.t, m: e.big.m, txt: `${e.name}の「${e.big.name}」！`, big: true, label: `大技「${e.big.name}」の予兆！` };
+  const base = e.rot ? e.rot[Math.floor((B.turn - 1) / 3) % e.rot.length] : (B.phase2 && e.p2 ? e.p2 : e.p);
+  const ratio = e.hp / e.maxHp;
+  const list = base.map(a => Object.assign({ t: a[0], w: a[1] }, a[2] || {})).filter(a => (a.lo == null || ratio >= a.lo) && (a.hi == null || ratio <= a.hi));
+  const a = wpick(list, x => x.w) || { t: 'atk', w: 1 };
+  return Object.assign({}, a);
+}
+function intentText() {
+  const a = B.intent; if (!a) return '';
+  if (a.big) return `⚠️ ${a.label}　防御がおすすめ！`;
+  if (B.reveal || TELEGRAPH.includes(a.t)) return `▶ 次の行動：${ACTION_LABEL[a.t] || '攻撃'}`;
+  return '▶ 様子をうかがっている…';
+}
+
+/* ---------- ダメージ計算 ---------- */
+function elemMult(e, el) { if (!el) return 1; if (e.weak === el) return 1.5; if (e.res === el) return 0.5; return 1; }
+function calcPlayerAttack(opts) {
+  opts = opts || {}; const e = B.enemy, w = weapon(), ps = S.player.status;
+  let atk = totalAtk() * (ps.atkUp ? 1.3 : 1) * (ps.atkDown ? 0.7 : 1) * (opts.mult || 1) * rand(0.9, 1.1);
+  let def = e.def * (e.status.defUp ? 1.4 : 1) * (e.status.defDown ? 0.7 : 1); if (w && w.pierce) def *= 1 - w.pierce;
+  let d = atk - def * 0.6, note = '';
+  const el = (w && w.el) || null; const em = elemMult(e, el); if (em > 1) note += '（弱点！）'; if (em < 1) note += '（耐性）'; d *= em;
+  if (w && w.bonus && e.tags.includes(w.bonus.tag)) { d *= w.bonus.m; note += '（特効！）'; }
+  if (e.resPhys && !el) { d *= e.resPhys; note += '（硬い）'; }
+  if (e.guard) d *= 0.5;
+  let crit = false; const cc = 0.08 + ((w && w.crit) || 0);
+  if (B.nextCrit || chance(cc)) { crit = true; d *= 1.7; } B.nextCrit = false;
+  return { dmg: Math.max(1, Math.floor(d)), crit, note };
+}
+function damageEnemy(d, opts) {
+  opts = opts || {}; const e = B.enemy; let rest = d;
+  if (e.shield > 0) { const a = Math.min(e.shield, rest); e.shield -= a; rest -= a; if (a > 0 && !opts.silent) blog(`シールドが${a}ダメージを吸収した！`); }
+  e.hp = Math.max(0, e.hp - rest);
+  floatText($('#b-enemy'), '-' + d, opts.crit ? 'crit' : 'dmg'); renderBattleBars(); return d;
+}
+async function hitPlayer(mult, text, a) {
+  const e = B.enemy; blog(text, 'bad'); await wait(260);
+  const eb = $('#b-enemy'); if (eb) { eb.classList.remove('lunge'); void eb.offsetWidth; eb.classList.add('lunge'); }
+  if (B.dodgeNext) { B.dodgeNext = false; blog('しかし、奇跡的に攻撃をかわした！', 'good'); return { hit: false }; }
+  const dg = (armor() && armor().dodge) || 0; if (dg && chance(dg)) { blog('ひらりと回避した！', 'good'); return { hit: false }; }
+  let atk = e.atk * (e.status.atkUp ? 1.3 : 1) * (e.status.atkDown ? 0.7 : 1) * mult * (B.phase2 && e.boss ? 1.08 : 1);
+  const ps = S.player.status; const def = totalDef() * (ps.defUp ? 1.4 : 1) * (ps.defDown ? 0.7 : 1);
+  let d = atk * rand(0.9, 1.1) - def * 0.6;
+  const a2 = armor(); if (a2 && a2.vsTag && e.tags.includes(a2.vsTag.tag)) d *= a2.vsTag.m;
+  d *= holdProd('dmgTaken'); if (B.defending) d *= 0.5;
+  d = Math.max(1, Math.floor(d));
+  if (B.reflect) { B.reflect = false; const r = Math.floor(d * 0.6); damageEnemy(r, { silent: true }); blog(`鏡が攻撃を反射！ ${e.name}に${r}ダメージ！`, 'good'); d = Math.max(1, d - r); }
+  hurtPlayer(d); blog(`${S.player.name}は${d}ダメージを受けた！${B.defending ? '（防御）' : ''}`, 'bad'); sfx('hurt');
+  const pb = $('#b-player'); if (pb) { pb.classList.remove('shake'); void pb.offsetWidth; pb.classList.add('shake'); }
+  renderBattleBars(); return { hit: true, dmg: d };
+}
+function statusOnPlayer(s, c, n) {
+  if (chance(playerStatusChance(s, c))) { const r = setStatus(S.player, s, n); blog(r === 'cancel' ? `${ST[s].n}が打ち消された。` : `${S.player.name}は${ST[s].ic}${ST[s].n}状態になった！`, 'bad'); }
+  else blog('状態異常を防いだ！', 'good');
+}
+
+/* ---------- 敵の行動 ---------- */
+async function runAction(a) {
+  const e = B.enemy; const t = a.t; const nm = e.name;
+  switch (t) {
+    case 'atk': await hitPlayer(a.m || 1, a.txt || `${nm}の攻撃！`, a); break;
+    case 'heavy': await hitPlayer(a.m || 1.8, a.txt || `${nm}の強攻撃！`, a); break;
+    case 'guard': e.guard = true; blog(`${nm}は身構えた！ 次に受けるダメージが半減する。`); break;
+    case 'heal': { const h = Math.max(5, Math.floor(e.maxHp * 0.2)); e.hp = Math.min(e.maxHp, e.hp + h); blog(a.txt ? `${nm}${a.txt}` : `${nm}は自分を回復した！ HP+${h}`, 'bad'); floatText($('#b-enemy'), '+' + h, 'heal'); break; }
+    case 'poison': { const r = await hitPlayer(a.m || 0.7, a.txt || `${nm}の毒攻撃！`, a); if (r.hit) statusOnPlayer('poison', a.c || 0.7, a.n || 3); break; }
+    case 'confuse': { const r = await hitPlayer(a.m || 0.7, a.txt || `${nm}の混乱攻撃！`, a); if (r.hit) statusOnPlayer('confuse', a.c || 0.6, a.n || 2); break; }
+    case 'para': { const r = await hitPlayer(a.m || 0.7, a.txt || `${nm}のしびれ攻撃！`, a); if (r.hit) statusOnPlayer('para', a.c || 0.5, a.n || 2); break; }
+    case 'steal': { const r = await hitPlayer(0.6, a.txt || `${nm}の盗み攻撃！`, a); if (r.hit) { const g = Math.min(S.player.gold, Math.max(5, Math.floor(S.player.gold * 0.1) + e.lv)); if (g > 0) { S.player.gold -= g; e.stolen += g; blog(`${g}Gを盗まれた！（倒せば取り返せる）`, 'bad'); } } break; }
+    case 'sellGold': { const r = await hitPlayer(0.7, a.txt || `${nm}の「ご購入ありがとうございます」！`, a); if (r.hit) { const g = Math.min(S.player.gold, Math.max(5, Math.floor(S.player.gold * 0.08))); if (g > 0) { S.player.gold -= g; e.stolen += g; e.hp = Math.min(e.maxHp, e.hp + Math.floor(e.maxHp * 0.04)); blog(`勝手に${g}G徴収された！`, 'bad'); } } break; }
+    case 'stealItem': {
+      const cands = Object.keys(S.inv).filter(id => ITEM[id].type === 'consumable' && S.inv[id] > 0);
+      if (!cands.length) { await hitPlayer(1, `${nm}の噛みつき！`, a); break; }
+      const id = pick(cands); removeItem(id, 1); e.stolenItems.push(id); blog(`${nm}が${ITEM[id].name}を盗んだ！（倒せば取り返せる）`, 'bad'); break; }
+    case 'seal': B.sealTurns = 3; blog(`${nm}がアイテムを封印した！ 2ターン使えない。`, 'bad'); break;
+    case 'selfUp': setStatus(e, 'atkUp', 3); blog(`${nm}は力を溜めた！ 攻撃力アップ！`, 'bad'); break;
+    case 'atkDownP': { const r = await hitPlayer(0.7, a.txt || `${nm}の弱体化攻撃！`, a); if (r.hit) statusOnPlayer('atkDown', 0.85, a.n || 3); break; }
+    case 'defDownP': { const r = await hitPlayer(0.7, a.txt || `${nm}の防御崩し！`, a); if (r.hit) statusOnPlayer('defDown', 0.85, a.n || 3); break; }
+    case 'flee': if (chance(0.5)) { blog(`${nm}は逃げ出した！`, 'ev'); B.enemyFled = true; } else blog(`${nm}は逃げようとして転んだ！`); break;
+    case 'boom': { blog(`${nm}は自爆した！`, 'bad'); await hitPlayer(a.m || 3, `ドカーン！`, a); e.hp = 0; B.boom = true; break; }
+    case 'summon': e.shield += Math.floor(e.maxHp * 0.15); blog(`${nm}は分身を召喚した！ シールド+${Math.floor(e.maxHp * 0.15)}`, 'bad'); break;
+    case 'counter': e.counter = true; blog(`${nm}は反撃の構えをとった！ 次の攻撃に注意！`, 'bad'); break;
+    case 'copy': { const l = B.lastAct; if (l === 'defend') { e.guard = true; blog(`${nm}は${S.player.name}のまねをして身構えた！`); } else if (l === 'item') { const h = Math.floor(e.maxHp * 0.12); e.hp = Math.min(e.maxHp, e.hp + h); blog(`${nm}は薬のまねをして回復した！ HP+${h}`, 'bad'); } else await hitPlayer(1.1, `${nm}は${S.player.name}の攻撃をまねた！`, a); break; }
+    case 'msg': blog(a.txt ? (a.txt.startsWith('「') ? `${nm}${a.txt}` : a.txt) : `${nm}は何か考えている…`); break;
+    case 'hint': blog(`${nm}「${pick(HINTS)}」`, 'quip'); break;
+    case 'timid': blog(`${nm}は弱気になっている…「返品だけは…」`, 'quip'); setStatus(e, 'atkDown', 2); break;
+    case 'glitch': {
+      const r = rnd(1, 5); blog(`${nm}の「ﾊﾞ■ｸﾞ」！`, 'bad');
+      if (r === 1) statusOnPlayer('confuse', 0.9, 2); else if (r === 2) { const h = Math.floor(e.maxHp * 0.1); e.hp = Math.min(e.maxHp, e.hp + h); blog(`数値が書き換わった！ 敵HP+${h}`, 'bad'); }
+      else if (r === 3) { S.player.status = {}; setStatus(e, 'atkUp', 3); blog('こちらの状態が初期化され、敵が強化された！', 'bad'); }
+      else if (r === 4) { const d = Math.max(1, Math.floor(totalMaxHp() * rnd(5, 12) / 100)); hurtPlayer(d); blog(`謎のダメージ！ ${d}`, 'bad'); }
+      else { e.shield += Math.floor(e.maxHp * 0.1); blog('ありえない数値のシールドが生成された！', 'bad'); } break; }
+    case 'timewarp': if (chance(0.5)) { statusOnPlayer('para', 1, 1); blog('時が止まった…！', 'bad'); } else await hitPlayer(1, `${nm}は時間を巻き戻してもう一度攻撃！`, a); break;
+    default: await hitPlayer(1, `${nm}の攻撃！`, a);
+  }
+}
+async function enemyTurn() {
+  const e = B.enemy; B.prevHp = S.player.hp;
+  e.guard = false; if (B.enemyFled) return;
+  if (B.enemySleep > 0) { B.enemySleep--; blog(`${e.name}はぐっすり眠っている…`); return; }
+  if (B.enemySkip > 0) { B.enemySkip--; blog(`${e.name}は動かなかった。`); return; }
+  if (e.status.para && chance(0.4)) { blog(`${e.name}は麻痺して動けない！`, 'good'); return; }
+  if (e.status.confuse && chance(0.35)) { const d = Math.max(1, Math.floor(e.maxHp * 0.06)); damageEnemy(d, { silent: true }); blog(`${e.name}は混乱して自分を攻撃した！ ${d}ダメージ`, 'good'); return; }
+  const a = B.intent || chooseAction();
+  await runAction(a);
+  if (S.player.hp <= 0 || e.hp <= 0 || B.enemyFled) return;
+  if (e.fast && chance(e.fast)) { blog(`${e.name}は素早く動いた！`, 'bad'); await runAction({ t: 'atk' }); }
+}
+function tickStatuses(t) { for (const k of Object.keys(t.status || {})) { t.status[k]--; if (t.status[k] <= 0) delete t.status[k]; } }
+function endRound() {
+  const e = B.enemy;
+  if (S.player.hp > 0 && S.player.status.poison) { const d = Math.max(3, Math.floor(totalMaxHp() * 0.05)); hurtPlayer(d); blog(`☠️ 毒で${d}ダメージ！`, 'bad'); }
+  const a = armor(); if (a && a.regen && S.player.hp > 0) { const h = healPlayer(a.regen); if (h) blog(`${a.name}の効果でHP+${h}`, 'heal'); }
+  if (e.hp > 0 && e.status.poison) { const d = Math.max(2, Math.floor(e.maxHp * 0.06)); damageEnemy(d, { silent: true }); blog(`☠️ ${e.name}は毒で${d}ダメージ！`, 'good'); }
+  tickStatuses(S.player); tickStatuses(e); if (B.sealTurns > 0) B.sealTurns--;
+  B.defending = false; B.inRound = false;
+}
+
+/* ---------- プレイヤーの行動 ---------- */
+async function doAttack() {
+  const e = B.enemy, w = weapon();
+  if (w && w.refuse && chance(w.refuse)) { blog(`${w.name}「やだ。今日は斬りたくない気分。」 攻撃を拒否された！`, 'bad'); return; }
+  blog(`${S.player.name}の攻撃！${w ? `（${w.name}）` : ''}`);
+  if (w && w.quips && chance(0.6)) blog(`${w.name}${pick(w.quips)}`, 'quip');
+  const pb = $('#b-player'); if (pb) { pb.classList.remove('lunge2'); void pb.offsetWidth; pb.classList.add('lunge2'); }
+  await wait(240);
+  const r = calcPlayerAttack();
+  damageEnemy(r.dmg, { crit: r.crit });
+  blog(`${e.name}に${r.dmg}ダメージ！${r.crit ? '【会心の一撃！】' : ''}${r.note}`, r.crit ? 'crit' : 'good'); sfx(r.crit ? 'crit' : 'attack');
+  const eb = $('#b-enemy'); if (eb) { eb.classList.remove('hit'); void eb.offsetWidth; eb.classList.add('hit'); }
+  if (e.counter) { e.counter = false; const c = Math.max(1, Math.floor(r.dmg * 0.4)); hurtPlayer(c); blog(`${e.name}の反撃！ ${c}ダメージ！`, 'bad'); }
+  e.guard = false;
+  if (w && w.onHit && e.hp > 0 && chance(enemyStatusChance(w.onHit.s, w.onHit.c))) { setStatus(e, w.onHit.s, w.onHit.n); blog(`${e.name}に${ST[w.onHit.s].ic}${ST[w.onHit.s].n}！`, 'good'); }
+  if (w && w.self && S.player.hp > 1) { const sd = Math.min(S.player.hp - 1, Math.max(1, Math.floor(totalMaxHp() * w.self))); hurtPlayer(sd); blog(`${w.name}が生命力を吸った… ${sd}ダメージ`, 'bad'); }
+  if (w && w.brk && chance(w.brk)) { blog(`${w.name}が壊れてしまった！`, 'bad'); removeItem(w.id, 1); }
+  renderBattleBars();
+}
+async function playerAction(act, payload) {
+  if (!B || B.over || B.busy) return;
+  if (act === 'item' && !payload) return;
+  B.busy = true; B.inRound = true; B.menu = 'main'; setCmdState(true);
+  try {
+    const ps = S.player.status; let skipped = false;
+    if (act === 'flee' && B.enemy.noFlee) { blog('この戦いからは逃げられない！', 'bad'); sfx('fail'); B.busy = false; B.inRound = false; renderBattle(); return; }
+    if (act === 'item' && B.sealTurns > 0) { blog('アイテムは封印されていて使えない！', 'bad'); sfx('fail'); B.busy = false; B.inRound = false; renderBattle(); return; }
+    if (ps.para && chance(0.4)) { blog('体がしびれて動けない！', 'bad'); skipped = true; }
+    else if (ps.confuse && chance(0.35)) { const d = Math.max(1, Math.floor(totalMaxHp() * 0.06)); hurtPlayer(Math.min(d, Math.max(0, S.player.hp - 1))); blog(`混乱して自分を攻撃してしまった！ ${d}ダメージ`, 'bad'); skipped = true; }
+    if (!skipped) {
+      if (act === 'attack') { await doAttack(); B.lastAct = 'attack'; }
+      else if (act === 'defend') { B.defending = true; B.lastAct = 'defend'; blog(`${S.player.name}は身を守っている…（被ダメージ半減）`, 'good'); sfx('guard'); }
+      else if (act === 'item') {
+        const ok = useItem(payload, { battle: true });
+        if (!ok) { B.busy = false; B.inRound = false; renderBattle(); return; }
+        B.lastAct = 'item';
+      }
+      else if (act === 'flee') {
+        const c = clamp(0.45 + B.fleeBonus + (S.player.level - B.enemy.lv) * 0.02, 0.15, 0.9);
+        blog(`${S.player.name}は逃げようとした…`);
+        if (chance(c)) { await wait(300); finishBattle('flee'); return; }
+        blog('逃げられなかった！', 'bad'); B.lastAct = 'flee';
+      }
+    }
+    if (B.enemy.hp <= 0) { finishBattle('win'); return; }
+    if (S.player.hp <= 0) { finishBattle('lose'); return; }
+    if (B.extraAction) { B.extraAction = false; blog('時空が乱れ、敵のターンが飛ばされた！', 'good'); B.busy = false; B.inRound = false; B.intent = chooseAction(); renderBattle(); refresh(); return; }
+    await wait(350);
+    await enemyTurn();
+    if (B.enemyFled) { finishBattle('enemyFled'); return; }
+    if (B.enemy.hp <= 0) { finishBattle('win'); return; }
+    if (S.player.hp <= 0) { finishBattle('lose'); return; }
+    endRound();
+    if (B.enemy.hp <= 0) { finishBattle('win'); return; }
+    if (S.player.hp <= 0) { finishBattle('lose'); return; }
+    await startRound();
+  } catch (err) { console.error(err); if (B && !B.over) { B.busy = false; B.inRound = false; renderBattle(); } }
+}
+
+/* ---------- 戦闘イベント ---------- */
+async function maybeBattleEvent(when) {
+  if (!B || B.over) return;
+  let ev = null;
+  if (when === 'start') { if (B.enemy.secret) ev = BEV.find(x => x.id === 'boss-secret'); else if (chance(0.22)) ev = wpick(BEV.filter(x => x.when === 'start' && !x.cond || x.when === 'start' && x.cond()), x => x.w); }
+  else if (B.turn >= 2 && B.evCount < 3 && chance(0.15)) { ev = wpick(BEV.filter(x => x.when === 'turn' && (!x.cond || x.cond())), x => x.w); }
+  if (!ev) return;
+  B.evCount++; S.disc.events['b:' + ev.id] = (S.disc.events['b:' + ev.id] || 0) + 1; sfx('event');
+  try { await ev.run(); } catch (e) { console.error(e); }
+  renderBattleBars(); renderBattle(); await wait(250);
+}
+
+/* ---------- 戦闘終了 ---------- */
+const HOLD_BONUS = [
+  { enemy: 'mini-golem', has: 'nothing-stone', gold: 100, text: '「何も起きない石」が共鳴し、ゴーレムが金貨を落とした！' },
+  { enemy: 'zombie-clerk', has: 'hero-receipt', gold: 60, text: '店員が「領収書をください」と言いながら謝礼を渡してきた！' },
+  { enemy: 'dark-merchant', has: 'maou-card', gold: 150, text: '魔王の名刺を見た闇商人が震えながら大金を差し出した！' },
+  { enemy: 'ancient-machine', has: 'some-part', exp: 120, text: '機械兵が「それ、俺の部品」と言って経験値をくれた！' },
+  { enemy: 'cursed-vm', has: 'complaint-ticket', gold: 80, text: '呪いの自販機は文句券を見て素直になった！' }
+];
+function finishBattle(result) {
+  if (!B || B.over) return;
+  B.over = true; B.busy = false; B.inRound = false;
+  const e = B.enemy; const res = { result, exp: 0, gold: 0, drops: [], levelups: [], notes: [] }; B.result = res;
+  S.stats.battles++; S.stats.buyStreak = 0; S.disc.enemies[e.id] = 1;
+  const def = ENEMY[e.id];
+  if (result === 'win' || result === 'enemyFled') {
+    if (result === 'enemyFled') { res.notes.push(`${e.name}は逃げてしまった。報酬はない。`); S.stats.winsNoBuy = 0; }
+    else {
+      let exp = e.exp, gold = e.gold + e.stolen; if (B.boom) { exp = Math.floor(exp * 0.5); gold = Math.floor(gold * 0.5); res.notes.push('自爆したので報酬は半分。'); }
+      if (S.contract > 0) { exp = Math.floor(exp * 1.5); gold = Math.floor(gold * 0.5); S.contract--; res.notes.push('📄 契約書の効果：経験値1.5倍、ゴールド半分。'); }
+      const gm = holdProd('goldMult'); if (gm !== 1) { gold = Math.floor(gold * gm); res.notes.push('🪙 呪われた金貨の効果でゴールド増加。'); }
+      if (e.stolen) res.notes.push(`盗まれた${e.stolen}Gを取り返した！`);
+      S.stats.wins++; S.stats.winsNoBuy++; S.defeated[e.id] = (S.defeated[e.id] || 0) + 1;
+      res.gold = gold; res.exp = exp; addGold(gold);
+      for (const id of e.stolenItems) { giveItem(id); res.notes.push(`盗まれた${ITEM[id].name}を取り返した！`); }
+      for (const [id, ch] of e.drops) if (chance(ch)) { const r = giveItem(id); res.drops.push(ITEM[id].name + (r === 'converted' ? '（売却）' : '')); }
+      for (const hb of HOLD_BONUS) if (hb.enemy === e.id && (S.inv[hb.has] > 0 || S.equip.weapon === hb.has)) { if (hb.gold) addGold(hb.gold); if (hb.exp) exp += hb.exp; res.notes.push(`🎁 ${hb.text}`); res.exp = exp; S.disc.events['hold-bonus'] = (S.disc.events['hold-bonus'] || 0) + 1; break; }
+      if (def && def.story) discoverStory(def.story);
+      if (e.boss) { res.notes.push('★ ボス撃破！'); say(e.say[2] ? `……${e.name}の声が聞こえた気がします。` : vmLine('win')); }
+      else say(vmLine('win'));
+      gainExperience(exp);
+      if (def && def.ending && !S.flags['end:' + def.ending]) setTimeout(() => showEnding(def.ending), 1600);
+    }
+    sfx('win');
+  } else if (result === 'lose') {
+    S.stats.losses++; S.stats.winsNoBuy = 0;
+    const lost = loseGold(Math.floor(S.player.gold * 0.2)); S.player.hp = Math.max(1, Math.ceil(totalMaxHp() * 0.5));
+    res.notes.push(`力尽きた…。蘇生手数料として${lost}Gを失った。HPは半分まで回復した。`); say(vmLine('lose')); sfx('lose');
+  } else if (result === 'flee') {
+    S.stats.flees++; S.stats.winsNoBuy = 0; res.notes.push('うまく逃げ切った！（報酬はない）'); if (e.stolen) res.notes.push(`盗まれた${e.stolen}Gは戻ってこない…`); sfx('flee');
+  }
+  S.player.status = {}; tick(1);
+  checkUnlocks(); checkAchievements(); checkAutoEvents(); setBgmFor();
+  renderBattle(); refresh();
+}
+
+/* ---------- 探索 ---------- */
+function explore() {
+  if (B && !B.over) return;
+  S.stats.explores++; tick(1); const lv = S.player.level; const r = Math.random(); let text;
+  if (r < 0.42) { const p = pickRandomEnemy(); text = `🧭 探索中に${p.def.name}と遭遇した！`; log(text); setExploreText(text); startBattle(p.def.id, { lv: p.lv }); return; }
+  if (r < 0.62) { const g = rnd(15 + lv * 5, 40 + lv * 10); addGold(g); text = `🧭 道端で${g}Gを拾った！`; }
+  else if (r < 0.77) { const id = pick(['small-potion', 'antidote-herb', 'onigiri', 'water', 'nothing-stone', 'manju', 'hero-receipt']); giveItem(id); text = `🧭 茂みの中で「${ITEM[id].name}」を見つけた。`; }
+  else if (r < 0.87) { const d = Math.min(S.player.hp - 1, Math.max(1, Math.floor(totalMaxHp() * 0.08))); hurtPlayer(d); text = `🧭 落とし穴に落ちた！ ${d}ダメージ。`; }
+  else if (r < 0.95) { const x = 5 + lv * 2; gainExperience(x); text = pick(['旅の老人が冒険談を聞かせてくれた。', '看板に「この先、自販機あり」と書かれていた。', '謎の旅人に「自販機は友達だ」と教わった。']); text = `🧭 ${text} 経験値+${x}`; }
+  else { const id = pick(['hi-potion', 'fire-scroll', 'ice-scroll', 'smoke-ball', 'mirror-shard', 'hero-sports']); giveItem(id); text = `🧭 古い祠で「${ITEM[id].name}」を見つけた！ ラッキー！`; sfx('rare'); }
+  log(text); setExploreText(text); toast(text); checkAchievements(); refresh();
+}
+function setExploreText(t) { const x = $('#b-explore-res'); if (x) x.textContent = t; }
+
+/* ---------- バトル画面UI ---------- */
+function buildBattleView() {
+  $('#view-battle').innerHTML = `
+  <div id="b-select">
+    <div class="panel">
+      <h2>⚔️ 挑戦する</h2>
+      <div class="b-actions">
+        <button class="btn primary big" id="b-random">🎲 ランダム遭遇</button>
+        <button class="btn big" id="b-explore">🧭 探索する</button>
+      </div>
+      <p class="small" id="b-explore-res">探索すると、敵・お宝・罠・出会いに遭遇する。</p>
+    </div>
+    <div class="panel"><h3>👑 ボス・特別な相手</h3><div id="b-bosses" class="boss-list"></div></div>
+    <div class="panel"><h3>📚 遭遇済みの敵（再戦）</h3><div id="b-known" class="known-list"></div></div>
+  </div>
+  <div id="b-arena" hidden>
+    <div class="b-field">
+      <div class="b-card enemy" id="b-enemy">
+        <div class="b-ico" id="b-eico"></div>
+        <div class="b-info"><div class="b-name" id="b-ename"></div><div class="small" id="b-edesc"></div>
+          <div class="bar hp"><i id="b-ehp"></i><i class="shield" id="b-esh"></i><span id="b-ehptxt"></span></div>
+          <div class="chips" id="b-echips"></div><div class="intent" id="b-intent"></div></div>
+      </div>
+      <div class="b-card player" id="b-player">
+        <div class="b-ico" id="b-pico">🧑‍🎤</div>
+        <div class="b-info"><div class="b-name" id="b-pname"></div><div class="small" id="b-pequip"></div>
+          <div class="bar hp"><i id="b-php"></i><span id="b-phptxt"></span></div>
+          <div class="chips" id="b-pchips"></div></div>
+      </div>
+    </div>
+    <div id="b-log" class="console" aria-live="polite"></div>
+    <div id="b-cmd" class="cmds">
+      <button class="btn cmd" data-act="attack">⚔️ 攻撃</button>
+      <button class="btn cmd" data-act="itemmenu">🎒 アイテム</button>
+      <button class="btn cmd" data-act="defend">🛡️ 防御</button>
+      <button class="btn cmd" data-act="flee">💨 逃げる</button>
+    </div>
+    <div id="b-items" class="panel" hidden></div>
+    <div id="b-result" class="panel result" hidden></div>
+  </div>`;
+  $('#b-random').onclick = () => { const p = pickRandomEnemy(); startBattle(p.def.id, { lv: p.lv }); };
+  $('#b-explore').onclick = explore;
+  $('#b-cmd').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b || b.disabled) return; const act = b.dataset.act;
+    if (act === 'itemmenu') { if (!B || B.over || B.busy) return; B.menu = B.menu === 'items' ? 'main' : 'items'; renderBattle(); sfx('click'); }
+    else { sfx('click'); playerAction(act); }
+  });
+}
+function setCmdState(disabled) { for (const b of document.querySelectorAll('#b-cmd button')) b.disabled = disabled; }
+function renderBattleBars() {
+  if (!B) return; const e = B.enemy; const tot = totalMaxHp();
+  const eh = $('#b-ehp'); if (!eh) return;
+  eh.style.width = clamp(e.hp / e.maxHp * 100, 0, 100) + '%'; $('#b-esh').style.width = e.shield > 0 ? clamp(e.shield / e.maxHp * 100, 0, 100) + '%' : '0%';
+  $('#b-ehptxt').textContent = `${Math.ceil(e.hp)} / ${e.maxHp}${e.shield > 0 ? `（盾${e.shield}）` : ''}`;
+  const ph = $('#b-php'); const pp = clamp(S.player.hp / tot * 100, 0, 100); ph.style.width = pp + '%'; ph.className = pp < 25 ? 'low' : pp < 50 ? 'mid' : '';
+  $('#b-phptxt').textContent = `${Math.max(0, Math.ceil(S.player.hp))} / ${tot}`;
+  renderHUD();
+}
+function renderBattle() {
+  if (!$('#b-select')) return;
+  const sel = $('#b-select'), arena = $('#b-arena');
+  if (!B) {
+    sel.hidden = false; arena.hidden = true; renderBattleSelect(); return;
+  }
+  sel.hidden = true; arena.hidden = false; const e = B.enemy;
+  $('#b-eico').textContent = e.icon; $('#b-ename').textContent = `${e.name}  Lv${e.lv}${e.boss ? '【BOSS】' : ''}`; $('#b-edesc').textContent = e.desc;
+  $('#b-enemy').classList.toggle('boss', !!e.boss);
+  $('#b-pname').textContent = `${S.player.name}  Lv${S.player.level}`; $('#b-pequip').textContent = `⚔️ ${weapon() ? weapon().name : 'なし'}　🛡️ ${armor() ? armor().name : 'なし'}${B.defending ? '　【防御中】' : ''}`;
+  const ec = $('#b-echips'); ec.textContent = ''; ec.appendChild(statusChips(e)); if (e.guard) ec.appendChild(el('span', 'chip good', '🛡️ 身構え')); if (e.counter) ec.appendChild(el('span', 'chip bad', '↩️ 反撃の構え'));
+  const pc = $('#b-pchips'); pc.textContent = ''; pc.appendChild(statusChips(S.player)); if (B.defending) pc.appendChild(el('span', 'chip good', '🛡️ 防御')); if (B.sealTurns > 0) pc.appendChild(el('span', 'chip bad', '🔒 アイテム封印'));
+  $('#b-intent').textContent = B.over ? '' : intentText();
+  renderBattleBars();
+  const lg = $('#b-log'); if (lg.childElementCount !== B.log.length) { lg.textContent = ''; for (const l of B.log) lg.appendChild(el('div', 'logline ' + l.c, l.t)); lg.scrollTop = lg.scrollHeight; }
+  const cmd = $('#b-cmd'); cmd.hidden = B.over; setCmdState(B.busy || B.over);
+  const fb = cmd.querySelector('[data-act="flee"]'); fb.disabled = B.busy || B.over || e.noFlee; fb.title = e.noFlee ? 'この戦いからは逃げられない' : '';
+  const itp = $('#b-items'); itp.hidden = !(B.menu === 'items' && !B.over); if (!itp.hidden) renderBattleItems(itp);
+  const rp = $('#b-result'); rp.hidden = !B.over; if (B.over) renderResult(rp);
+}
+function renderBattleItems(box) {
+  box.textContent = ''; box.appendChild(el('h3', '', '🎒 使うアイテム'));
+  const ids = Object.keys(S.inv).filter(id => ITEM[id] && S.inv[id] > 0 && itemUsable(ITEM[id], true));
+  if (B.sealTurns > 0) box.appendChild(el('p', 'reason', '🔒 アイテムは封印されている！'));
+  if (!ids.length) box.appendChild(el('p', 'empty', '使えるアイテムがない。'));
+  const grid = el('div', 'bitems');
+  for (const id of ids) { const it = ITEM[id]; const b = el('button', 'btn bitem', ''); b.appendChild(el('span', '', `${it.icon} ${it.name} ×${S.inv[id]}`)); b.appendChild(el('small', '', effectText(it))); b.disabled = B.busy || B.sealTurns > 0; b.onclick = () => playerAction('item', id); grid.appendChild(b); }
+  box.appendChild(grid);
+}
+function renderResult(box) {
+  const r = B.result, e = B.enemy; box.textContent = '';
+  const title = { win: '🎉 勝利！', lose: '💀 敗北…', flee: '💨 逃走成功', enemyFled: '💨 敵に逃げられた' }[r.result]; box.appendChild(el('h2', 'res-title ' + r.result, title));
+  if (r.result === 'win') {
+    box.appendChild(el('p', '', `経験値 +${r.exp}　ゴールド +${r.gold}G`)); if (r.drops.length) box.appendChild(el('p', 'good', `🎁 ドロップ：${r.drops.join('、')}`));
+    for (const t of r.levelups) box.appendChild(el('p', 'lv', '⭐ レベルアップ！ ' + t));
+  }
+  for (const n of r.notes) box.appendChild(el('p', 'small', n));
+  const f = el('div', 'b-actions');
+  if (!e.boss) { const again = el('button', 'btn primary', r.result === 'lose' ? '🔁 再挑戦（ランダム）' : '⚔️ もう一度戦う'); again.onclick = () => { B = null; const p = pickRandomEnemy(); startBattle(p.def.id, { lv: p.lv }); }; f.appendChild(again); }
+  else { const retry = el('button', 'btn primary', '🔁 同じ相手に再挑戦'); retry.onclick = () => { const id = e.id, lv = e.lv; B = null; startBattle(id, { lv }); }; if (r.result === 'lose' || r.result === 'flee') f.appendChild(retry); }
+  const back = el('button', 'btn', '🏪 自販機へ戻る'); back.onclick = () => { B = null; switchView('vending'); }; f.appendChild(back);
+  const sel = el('button', 'btn', '📋 相手を選び直す'); sel.onclick = () => { B = null; renderBattle(); refresh(); }; f.appendChild(sel);
+  box.appendChild(f);
+}
+function renderBattleSelect() {
+  const bl = $('#b-bosses'); bl.textContent = ''; let hidden = 0;
+  for (const d of ENEMIES.filter(x => x.boss)) {
+    const ok = enemyAvailable(d), seen = S.disc.enemies[d.id];
+    if (d.secret && !ok && !seen) { hidden++; continue; }
+    const b = el('button', 'btn boss-btn' + (ok ? '' : ' locked'), ''); b.disabled = !ok;
+    b.appendChild(el('b', '', ok || seen ? `${d.icon} ${d.name}（Lv${d.lv}）` : '❓ ？？？')); b.appendChild(el('small', '', ok ? `挑戦可能　撃破${S.defeated[d.id] || 0}回` : `条件：${d.secret ? '？？？' : d.reqText}`));
+    if (ok) b.onclick = () => startBattle(d.id); bl.appendChild(b);
+  }
+  if (hidden) bl.appendChild(el('p', 'small', `？？？ …条件がまったくわからない相手が、${hidden}体いるらしい。`));
+  const kn = $('#b-known'); kn.textContent = ''; const seen = ENEMIES.filter(x => !x.boss && S.disc.enemies[x.id]);
+  if (!seen.length) kn.appendChild(el('p', 'small', 'まだ誰とも遭遇していない。'));
+  for (const d of seen) { const b = el('button', 'btn small', `${d.icon} ${d.name} Lv${d.lv}`); b.onclick = () => startBattle(d.id); kn.appendChild(b); }
+}
+
+/* =====================================================================
+   p7: 音（Web Audio）・初期化・入力
+   ===================================================================== */
+let AC = null, master = null, bgmGain = null, sfxGain = null, bgmTimer = null, bgmName = null, bgmStep = 0, bgmNext = 0;
+function initAudio() {
+  if (AC) { if (AC.state === 'suspended') AC.resume().catch(() => {}); return; }
+  try {
+    const C = window.AudioContext || window.webkitAudioContext; if (!C) return;
+    AC = new C(); master = AC.createGain(); master.gain.value = 0.8; master.connect(AC.destination);
+    bgmGain = AC.createGain(); bgmGain.gain.value = 0.09; bgmGain.connect(master);
+    sfxGain = AC.createGain(); sfxGain.gain.value = 0.28; sfxGain.connect(master);
+  } catch (e) { AC = null; }
+}
+const mtof = n => 440 * Math.pow(2, (n - 69) / 12);
+function tone(freq, t0, dur, type, gain, dest, slideTo) {
+  const o = AC.createOscillator(), g = AC.createGain(); o.type = type; o.frequency.setValueAtTime(freq, t0);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), t0 + dur);
+  g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(gain, t0 + 0.012); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g); g.connect(dest); o.start(t0); o.stop(t0 + dur + 0.03);
+}
+function noiseHit(t0, dur, gain, dest) {
+  const len = Math.max(1, Math.floor(AC.sampleRate * dur)); const buf = AC.createBuffer(1, len, AC.sampleRate); const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const s = AC.createBufferSource(); s.buffer = buf; const g = AC.createGain(); g.gain.value = gain; s.connect(g); g.connect(dest); s.start(t0);
+}
+const SFX = {
+  click: t => tone(660, t, 0.06, 'square', 0.3, sfxGain),
+  buy: t => { tone(880, t, 0.08, 'square', 0.3, sfxGain); tone(1320, t + 0.08, 0.12, 'square', 0.3, sfxGain); noiseHit(t + 0.02, 0.06, 0.2, sfxGain); },
+  fail: t => { tone(220, t, 0.15, 'sawtooth', 0.3, sfxGain, 150); tone(165, t + 0.12, 0.2, 'sawtooth', 0.3, sfxGain, 110); },
+  levelup: t => [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, t + i * 0.1, 0.18, 'square', 0.32, sfxGain)),
+  attack: t => { noiseHit(t, 0.1, 0.5, sfxGain); tone(300, t, 0.1, 'square', 0.25, sfxGain, 120); },
+  hurt: t => { tone(200, t, 0.18, 'sawtooth', 0.35, sfxGain, 80); noiseHit(t, 0.1, 0.4, sfxGain); },
+  crit: t => { noiseHit(t, 0.15, 0.6, sfxGain); tone(900, t, 0.12, 'square', 0.3, sfxGain, 300); tone(1200, t + 0.08, 0.15, 'square', 0.3, sfxGain); },
+  heal: t => [660, 880, 1100].forEach((f, i) => tone(f, t + i * 0.07, 0.14, 'sine', 0.35, sfxGain)),
+  item: t => { tone(700, t, 0.07, 'triangle', 0.4, sfxGain); tone(990, t + 0.07, 0.1, 'triangle', 0.4, sfxGain); },
+  equip: t => { tone(440, t, 0.06, 'square', 0.28, sfxGain); tone(587, t + 0.06, 0.1, 'square', 0.28, sfxGain); },
+  win: t => [523, 659, 784, 659, 784, 1047].forEach((f, i) => tone(f, t + i * 0.12, 0.2, 'square', 0.3, sfxGain)),
+  lose: t => [392, 330, 262, 196].forEach((f, i) => tone(f, t + i * 0.2, 0.3, 'triangle', 0.4, sfxGain)),
+  ach: t => [784, 988, 1175, 1568].forEach((f, i) => tone(f, t + i * 0.08, 0.2, 'triangle', 0.4, sfxGain)),
+  rare: t => [523, 784, 1047, 1568, 2093].forEach((f, i) => tone(f, t + i * 0.07, 0.3, 'sine', 0.35, sfxGain)),
+  secret: t => { tone(440, t, 0.2, 'sine', 0.35, sfxGain, 880); tone(660, t + 0.15, 0.3, 'sine', 0.35, sfxGain, 1320); },
+  event: t => { tone(600, t, 0.08, 'triangle', 0.35, sfxGain); tone(800, t + 0.09, 0.08, 'triangle', 0.35, sfxGain); },
+  eerie: t => { tone(110, t, 0.8, 'sine', 0.4, sfxGain, 90); tone(117, t, 0.8, 'sine', 0.3, sfxGain, 95); },
+  poke: t => tone(rnd(300, 500), t, 0.05, 'square', 0.25, sfxGain),
+  encounter: t => { tone(300, t, 0.1, 'sawtooth', 0.3, sfxGain, 600); tone(450, t + 0.1, 0.15, 'sawtooth', 0.3, sfxGain, 900); },
+  guard: t => tone(250, t, 0.15, 'triangle', 0.4, sfxGain, 400),
+  flee: t => tone(900, t, 0.25, 'triangle', 0.35, sfxGain, 300),
+  phase: t => { tone(150, t, 0.4, 'sawtooth', 0.35, sfxGain, 300); tone(155, t, 0.4, 'sawtooth', 0.3, sfxGain, 310); },
+  ending: t => [523, 659, 784, 1047, 784, 1047, 1319, 1568].forEach((f, i) => tone(f, t + i * 0.2, 0.4, 'sine', 0.35, sfxGain))
+};
+function sfx(name) {
+  if (!AC || !S.settings.sfx || !SFX[name]) return;
+  try { if (AC.state === 'suspended') AC.resume(); SFX[name](AC.currentTime + 0.01); } catch (e) {}
+}
+/* ---- BGM（簡易シーケンサー） ---- */
+const TRACKS = {
+  vending: { bpm: 108, lead: [72, 0, 76, 0, 79, 0, 76, 0, 77, 0, 74, 0, 72, 0, 0, 0, 71, 0, 74, 0, 77, 0, 74, 0, 72, 0, 0, 0, 67, 0, 0, 0], bass: [48, 0, 0, 0, 55, 0, 0, 0, 53, 0, 0, 0, 50, 0, 0, 0, 55, 0, 0, 0, 50, 0, 0, 0, 48, 0, 0, 0, 43, 0, 0, 0], lt: 'square', lg: 0.5, hat: 2 },
+  battle: { bpm: 160, lead: [69, 0, 72, 69, 76, 0, 72, 0, 71, 0, 74, 71, 77, 0, 74, 0, 69, 72, 76, 0, 81, 0, 76, 0, 74, 0, 72, 0, 69, 0, 0, 0], bass: [45, 45, 0, 45, 45, 0, 45, 45, 47, 47, 0, 47, 47, 0, 47, 47, 45, 45, 0, 45, 45, 0, 45, 45, 43, 43, 0, 43, 40, 40, 0, 40], lt: 'square', lg: 0.45, hat: 1 },
+  boss: { bpm: 138, lead: [62, 0, 0, 65, 0, 0, 69, 0, 68, 0, 0, 64, 0, 0, 62, 0, 62, 0, 65, 0, 69, 0, 74, 0, 73, 0, 69, 0, 65, 0, 62, 0], bass: [38, 0, 38, 0, 38, 0, 38, 38, 37, 0, 37, 0, 37, 0, 37, 37, 38, 0, 38, 0, 38, 0, 38, 38, 36, 0, 36, 0, 41, 0, 41, 0], lt: 'sawtooth', lg: 0.32, hat: 2 }
+};
+function bgmSchedule() {
+  if (!AC || !bgmName) return; const tr = TRACKS[bgmName]; const stepDur = 60 / tr.bpm / 2;
+  while (bgmNext < AC.currentTime + 0.35) {
+    const i = bgmStep % 32; const l = tr.lead[i], b = tr.bass[i];
+    if (l) tone(mtof(l), bgmNext, stepDur * 1.6, tr.lt, tr.lg, bgmGain);
+    if (b) tone(mtof(b), bgmNext, stepDur * 1.8, 'triangle', 0.7, bgmGain);
+    if (i % tr.hat === 0) noiseHit(bgmNext, 0.03, 0.12, bgmGain);
+    if (bgmName === 'boss' && i % 8 === 0) tone(60, bgmNext, 0.2, 'sine', 0.8, bgmGain, 40);
+    bgmNext += stepDur; bgmStep++;
+  }
+}
+function stopBgm() { clearInterval(bgmTimer); bgmTimer = null; bgmName = null; }
+function setBgmFor() {
+  if (!AC || !S.settings.bgm) { stopBgm(); return; }
+  const want = (B && !B.over) ? (B.enemy.boss ? 'boss' : 'battle') : 'vending';
+  if (want === bgmName && bgmTimer) return;
+  stopBgm(); bgmName = want; bgmStep = 0; bgmNext = AC.currentTime + 0.1; bgmTimer = setInterval(bgmSchedule, 90); bgmSchedule();
+}
+function toggleBgm() { S.settings.bgm = !S.settings.bgm; initAudio(); setBgmFor(); refresh(); }
+document.addEventListener('visibilitychange', () => { if (!AC) return; if (document.hidden) AC.suspend().catch(() => {}); else if (S.settings.bgm || S.settings.sfx) AC.resume().catch(() => {}); });
+
+/* ---------- 再描画の統括 ---------- */
+function refresh() {
+  try {
+    renderHUD();
+    if (curView === 'vending') renderVending(); else renderBattle();
+    for (const f of liveRenders.slice()) { try { f(); } catch (e) { console.error(e); } }
+  } catch (e) { console.error(e); }
+  saveGame();
+}
+
+/* ---------- 初期化 ---------- */
+let lastActive = Date.now(), konamiBuf = [];
+function init() {
+  const loaded = loadGame();
+  buildVending(); buildBattleView();
+  document.body.classList.toggle('calm', !!S.settings.calm);
+  for (const b of document.querySelectorAll('#taskbar [data-view]')) b.onclick = () => switchView(b.dataset.view);
+  $('#tb-inv').onclick = openInventory; $('#tb-dex').onclick = openDex; $('#tb-ach').onclick = openAchievements; $('#tb-set').onclick = openSettings;
+  $('#h-ticker').onclick = openLog;
+  $('#btn-bgm').onclick = () => { toggleBgm(); if (S.settings.bgm) sfx('click'); };
+  $('#btn-sfx').onclick = () => { S.settings.sfx = !S.settings.sfx; initAudio(); if (S.settings.sfx) sfx('click'); refresh(); };
+  if (!loaded) seedAnnounced();
+  say(vmLine('visit'));
+  refresh();
+  if (!loaded) showIntro(); else { toast('おかえりなさい！ セーブデータを読み込みました。'); checkUnlocks(); checkAchievements(); }
+  const wake = () => { initAudio(); setBgmFor(); };
+  for (const ev of ['pointerdown', 'keydown']) document.addEventListener(ev, function once() { wake(); document.removeEventListener(ev, once); }, { passive: true });
+  for (const ev of ['pointerdown', 'keydown', 'mousemove']) document.addEventListener(ev, () => { lastActive = Date.now(); }, { passive: true });
+  setInterval(() => {
+    if (curView === 'vending' && !B && !modalStack.length && !evBusy && !uiLocked && Date.now() - lastActive > 45000 && VEVM.nag && evEligible(VEVM.nag)) { lastActive = Date.now(); triggerEvent('nag'); }
+  }, 10000);
+  document.addEventListener('keydown', e => {
+    const tag = (e.target && e.target.tagName) || ''; if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    konamiBuf.push(e.key.length === 1 ? e.key.toLowerCase() : e.key); if (konamiBuf.length > 10) konamiBuf.shift();
+    if (konamiBuf.join(',') === 'ArrowUp,ArrowUp,ArrowDown,ArrowDown,ArrowLeft,ArrowRight,ArrowLeft,ArrowRight,b,a') { konamiBuf = []; konamiCommand(); }
+  });
+  window.addEventListener('beforeunload', () => { saveGame(); });
+}
+window.addEventListener('DOMContentLoaded', init);
+window.addEventListener('error', e => { try { console.error('game error', e.message); } catch (_) {} });
+
+</script>
+</body>
+</html>
